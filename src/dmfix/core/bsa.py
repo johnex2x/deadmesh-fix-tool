@@ -27,6 +27,13 @@ def _normalize_path(path: str) -> str:
     return path.replace("\\", "/").strip("/").casefold()
 
 
+def _is_safe_entry_path(normalized: str) -> bool:
+    """Reject entry names that could escape an extraction directory."""
+    if not normalized or ":" in normalized:
+        return False
+    return all(part not in ("", ".", "..") for part in normalized.split("/"))
+
+
 class BsaArchive:
     """Read-only index and random-access reader for BSA versions 104 and 105."""
 
@@ -177,6 +184,10 @@ class BsaArchive:
         ):
             file_name = encoded_name.decode("cp1252")
             name = _normalize_path(f"{folder_name}/{file_name}")
+            if not _is_safe_entry_path(name):
+                raise ValueError(
+                    f"unsafe archive entry path {name!r} (possible path traversal)"
+                )
             if name in self._entries:
                 raise ValueError(f"duplicate archive path {name!r}")
             toggled = bool(raw_size & _COMPRESS_TOGGLE)

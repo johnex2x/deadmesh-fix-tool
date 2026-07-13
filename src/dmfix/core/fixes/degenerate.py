@@ -96,8 +96,16 @@ def _scanner(deadmesh_dir: str | Path | None = None) -> DmScan:
     """
     if deadmesh_dir is not None:
         return DmScan(deadmesh_dir)
-    checkout = Path(__file__).resolve().parents[4].parent / "DeadMesh - MOPP Collision Validator"
-    scanner_dir = find_deadmesh_dir([checkout])
+    try:
+        checkout = (
+            Path(__file__).resolve().parents[4].parent
+            / "DeadMesh - MOPP Collision Validator"
+        )
+        scanner_dir = find_deadmesh_dir([checkout])
+    except IndexError:  # path too shallow (e.g. frozen build layout)
+        scanner_dir = None
     if scanner_dir is None:
-        raise ValueError("dmscan.exe could not be located")
+        raise ValueError(
+            "dmscan.exe could not be located; configure the DeadMesh folder"
+        )
     return DmScan(scanner_dir)

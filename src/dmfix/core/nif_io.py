@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import struct
-import sys
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -247,6 +247,7 @@ def locate_collisions(path: str | Path) -> list[CollisionInfo]:
     from pyn.pynifly import NifFile, NiNode
 
     nif = NifFile(str(Path(path).resolve()))
+    # Accessing .nodes forces pynifly to populate node_ids (lazy side effect).
     nif.nodes
     collisions: list[CollisionInfo] = []
     for node_index, node in sorted(nif.node_ids.items()):

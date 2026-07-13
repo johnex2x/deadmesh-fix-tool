@@ -39,10 +39,6 @@ class ScanRecord:
     categories: list[FixCategory] = field(default_factory=list)
 
     @property
-    def is_bsa_member(self) -> bool:
-        return ".bsa" in self.file.lower()
-
-    @property
     def needs_fix(self) -> bool:
         return bool(self.categories)
 
@@ -142,8 +138,10 @@ class DmScan:
     def vs_check(self, original: str | Path, rebuilt: str | Path) -> bool:
         """dmscan --vs winding regression gate. True = rebuild is safe.
 
-        dmscan exits with code 3 when the rebuild introduced an inversion the
-        original did not have (player would fall through).
+        Exit codes (verified empirically): 0 = no regression, 3 = the rebuild
+        introduced an inversion the original did not have (player would fall
+        through), 2 = dmscan could not run the comparison. Fail closed: only
+        an explicit 0 counts as safe.
         """
         proc = subprocess.run(
             [str(self.exe), "--vs", str(Path(original).resolve()), str(Path(rebuilt).resolve())],
@@ -155,7 +153,7 @@ class DmScan:
             cwd=str(self.deadmesh_dir),
             creationflags=_NO_WINDOW,
         )
-        return proc.returncode != 3
+        return proc.returncode == 0
 
     def scan_file(self, nif_path: str | Path) -> ScanRecord:
         """Scan a single loose .nif (used to verify a fix)."""
@@ -172,9 +170,14 @@ class DmScan:
 
 def find_deadmesh_dir(candidates: list[str | Path] | None = None) -> Path | None:
     """Best-effort auto-detection of the DeadMesh install folder."""
-    default_candidates = [
-        Path(__file__).resolve().parents[4].parent / "DeadMesh - MOPP Collision Validator",
-    ]
+    default_candidates: list[Path] = []
+    try:
+        default_candidates.append(
+            Path(__file__).resolve().parents[4].parent
+            / "DeadMesh - MOPP Collision Validator"
+        )
+    except IndexError:  # path too shallow (e.g. frozen build layout)
+        pass
     for cand in [*(candidates or []), *default_candidates]:
         cand = Path(cand)
         if (cand / "dmscan.exe").is_file():

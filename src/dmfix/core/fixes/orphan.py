@@ -4,7 +4,9 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
+from dmfix.core.fixes.acceptance import nothing_got_worse
 from dmfix.core.nif_io import NifFileLayout
+from dmfix.core.scanner import DmScanError
 
 
 _SAFE_COLLISION_TYPES = {
@@ -27,7 +29,9 @@ class OrphanRemovalResult:
 
 
 def remove_orphan_collision(
-    input_path: str | Path, output_path: str | Path
+    input_path: str | Path,
+    output_path: str | Path,
+    deadmesh_dir: str | Path | None = None,
 ) -> OrphanRemovalResult:
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -63,6 +67,20 @@ def remove_orphan_collision(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(layout.remove_trailing_blocks(first_index))
         NifFileLayout.read(output_path)
+        # dmscan certification, same policy as every other fix: the removal is
+        # structural, but only the judge decides nothing got worse.
+        from dmfix.core.fixes.degenerate import _scanner
+
+        scanner = _scanner(deadmesh_dir)
+        baseline = scanner.scan_file(input_path).raw
+        scan = scanner.scan_file(output_path).raw
+        if not nothing_got_worse(baseline, scan):
+            output_path.unlink(missing_ok=True)
+            return _report_only(
+                output_path,
+                "dmscan verification failed after orphan removal; "
+                "remove the orphan in NifSkope instead",
+            )
         return OrphanRemovalResult(
             True,
             False,
@@ -70,7 +88,7 @@ def remove_orphan_collision(
             f"removed trailing orphan blocks {list(removed)}",
             removed,
         )
-    except (ValueError, OSError, IndexError, struct.error) as exc:
+    except (ValueError, OSError, IndexError, struct.error, DmScanError) as exc:
         output_path.unlink(missing_ok=True)
         return _report_only(output_path, str(exc))
 

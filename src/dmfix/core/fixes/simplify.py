@@ -17,7 +17,6 @@ from dmfix.core.fixes.mopp_rebuild import (
 )
 from dmfix.core.fixes.acceptance import simplify_scan_is_acceptable
 from dmfix.core.nif_io import NifFileLayout, locate_collisions, read_mopp
-from dmfix.core.scanner import DmScan, find_deadmesh_dir
 
 
 MAX_QUANTIZED_EXTENT = 65.535
@@ -75,18 +74,11 @@ def simplify_collision(
     if not triangles:
         raise ValueError("collision mesh has no non-degenerate triangles")
 
-    if deadmesh_dir is not None:
-        # Explicit DeadMesh location from the caller (pipeline/GUI/CLI).
-        scanner = DmScan(deadmesh_dir)
-    else:
-        # Source-checkout fallback for the test suite; fails in a frozen build.
-        checkout_scanner = (
-            Path(__file__).resolve().parents[4].parent / "DeadMesh - MOPP Collision Validator"
-        )
-        scanner_dir = find_deadmesh_dir([checkout_scanner])
-        if scanner_dir is None:
-            raise ValueError("dmscan.exe could not be located")
-        scanner = DmScan(scanner_dir)
+    # Explicit DeadMesh location from the caller (pipeline/GUI/CLI), with a
+    # source-checkout discovery fallback for the test suite.
+    from dmfix.core.fixes.degenerate import _scanner
+
+    scanner = _scanner(deadmesh_dir)
     baseline = scanner.scan_file(input_path).raw
     old_cull_worst = int(baseline["freeze"]["cullWorst"])
     initial_target = min(

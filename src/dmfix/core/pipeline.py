@@ -87,7 +87,9 @@ def _fix_functions():
         pass
     try:
         from dmfix.core.fixes.orphan import remove_orphan_collision
-        functions[FixCategory.ORPHAN_BLOCKS] = lambda src, dst, **kw: remove_orphan_collision(src, dst)
+        functions[FixCategory.ORPHAN_BLOCKS] = lambda src, dst, **kw: remove_orphan_collision(
+            src, dst, deadmesh_dir=kw.get("deadmesh_dir")
+        )
     except ImportError:
         pass
     return functions
@@ -177,11 +179,20 @@ def _collect_work_items(
                 with BsaArchive(bsa_path) as archive:
                     nif_names = [n for n in archive.namelist() if n.endswith(".nif")]
                     for name in nif_names:
-                        dest = extract_dir / Path(name.replace("/", "\\"))
+                        dest = (extract_dir / Path(name.replace("/", "\\"))).resolve()
+                        # Defense in depth: BsaArchive rejects traversal paths
+                        # at parse time, but never write outside the temp dir
+                        # regardless of what the archive index claimed.
+                        if not dest.is_relative_to(extract_dir.resolve()):
+                            raise ValueError(f"entry escapes extraction dir: {name!r}")
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         dest.write_bytes(archive.read(name))
-            except ValueError:
-                continue  # unreadable/unsupported archive: skip, loose scan still stands
+            except ValueError as error:
+                # Unreadable/unsupported archive: the loose scan still stands,
+                # but surface the skip instead of dropping it silently.
+                progress("extract", bsa_index, len(bsa_files),
+                         f"{bsa_path.name} SKIPPED: {error}")
+                continue
             if not extract_dir.is_dir():
                 continue
             progress("scan", bsa_index, len(bsa_files), f"{bsa_path.name} (extracted)")
