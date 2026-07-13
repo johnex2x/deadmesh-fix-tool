@@ -6,3 +6,4 @@ dist/
 *.spec.bak
 /out/
 /tmp/
+.agent/journal.md
