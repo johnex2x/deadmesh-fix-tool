@@ -123,10 +123,24 @@ def collect_work_items(
     """Scan the target folder (loose + BSA members) and build the fix worklist.
 
     Returns (items needing a fix, temp dir holding extracted BSA members).
+    The caller owns the returned temp dir; on exception it is already removed.
     """
     scanner = DmScan(options.deadmesh_dir)
     temp_root = Path(tempfile.mkdtemp(prefix="dmfix-bsa-"))
+    try:
+        return _collect_work_items(target_folder, options, progress, scanner, temp_root)
+    except BaseException:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
 
+
+def _collect_work_items(
+    target_folder: Path,
+    options: PipelineOptions,
+    progress: ProgressCallback,
+    scanner: DmScan,
+    temp_root: Path,
+) -> tuple[list[WorkItem], Path]:
     progress("scan", 0, 1, str(target_folder))
     loose_records = scanner.scan_dir(target_folder)
 

@@ -1,0 +1,145 @@
+"""Centralized English and Traditional Chinese UI strings."""
+from __future__ import annotations
+
+
+STRINGS: dict[str, dict[str, str]] = {
+    "app_title": {"en": "DeadMesh Fix Tool", "zh-TW": "DeadMesh 修復工具"},
+    "setup_title": {"en": "DeadMesh setup", "zh-TW": "DeadMesh 設定"},
+    "setup_explanation": {
+        "en": "Select the DeadMesh installation folder containing dmscan.exe.",
+        "zh-TW": "請選擇包含 dmscan.exe 的 DeadMesh 安裝資料夾。",
+    },
+    "setup_hint": {
+        "en": "DeadMesh on Nexus Mods: https://www.nexusmods.com/skyrimspecialedition/mods/181829",
+        "zh-TW": "Nexus Mods 上的 DeadMesh：https://www.nexusmods.com/skyrimspecialedition/mods/181829",
+    },
+    "deadmesh_folder": {"en": "DeadMesh folder", "zh-TW": "DeadMesh 資料夾"},
+    "browse": {"en": "Browse...", "zh-TW": "瀏覽..."},
+    "save_continue": {"en": "Save and continue", "zh-TW": "儲存並繼續"},
+    "quit": {"en": "Quit", "zh-TW": "離開"},
+    "invalid_deadmesh": {
+        "en": "That folder does not contain dmscan.exe.",
+        "zh-TW": "該資料夾不包含 dmscan.exe。",
+    },
+    "select_deadmesh_folder": {
+        "en": "Select DeadMesh folder",
+        "zh-TW": "選擇 DeadMesh 資料夾",
+    },
+    "target_folder": {"en": "Target mod folder", "zh-TW": "目標模組資料夾"},
+    "output_folder": {"en": "Output folder", "zh-TW": "輸出資料夾"},
+    "select_target_folder": {
+        "en": "Select target mod folder",
+        "zh-TW": "選擇目標模組資料夾",
+    },
+    "select_output_folder": {
+        "en": "Select output folder",
+        "zh-TW": "選擇輸出資料夾",
+    },
+    "scan": {"en": "Scan", "zh-TW": "掃描"},
+    "fix_categories": {"en": "Fix categories", "zh-TW": "修復類別"},
+    "category_crash": {
+        "en": "Crash risk (broken MOPP)",
+        "zh-TW": "當機風險（損壞的 MOPP）",
+    },
+    "category_heavy": {
+        "en": "Heavy collision",
+        "zh-TW": "過重碰撞網格",
+    },
+    "category_degenerate": {
+        "en": "Degenerate collision",
+        "zh-TW": "退化碰撞三角形",
+    },
+    "category_inverted": {
+        "en": "Inverted collision",
+        "zh-TW": "反向碰撞面",
+    },
+    "category_orphan_blocks": {
+        "en": "Orphaned collision blocks",
+        "zh-TW": "孤立碰撞區塊",
+    },
+    "category_unfixable": {
+        "en": "Manual repair required",
+        "zh-TW": "需要手動修復",
+    },
+    "strength": {"en": "Strength", "zh-TW": "簡化強度"},
+    "strength_conservative": {"en": "Conservative", "zh-TW": "保守"},
+    "strength_normal": {"en": "Normal", "zh-TW": "一般"},
+    "strength_aggressive": {"en": "Aggressive", "zh-TW": "積極"},
+    "include_bsa": {
+        "en": "Include BSA archives",
+        "zh-TW": "包含 BSA 封存檔",
+    },
+    "fix": {"en": "Fix", "zh-TW": "修復"},
+    "status_ready": {"en": "Ready", "zh-TW": "就緒"},
+    "status_scanning": {"en": "Scanning: {message}", "zh-TW": "掃描中：{message}"},
+    "status_extracting": {"en": "Extracting: {message}", "zh-TW": "解壓縮中：{message}"},
+    "status_fixing": {"en": "Fixing: {message}", "zh-TW": "修復中：{message}"},
+    "status_scan_complete": {
+        "en": "Scan complete: {count} item(s) found",
+        "zh-TW": "掃描完成：找到 {count} 個項目",
+    },
+    "status_run_complete": {"en": "Fix run complete", "zh-TW": "修復作業完成"},
+    "status_pending": {"en": "Pending", "zh-TW": "待處理"},
+    "status_fixed": {"en": "Fixed", "zh-TW": "已修復"},
+    "status_failed": {"en": "Failed", "zh-TW": "失敗"},
+    "status_unfixable": {"en": "Unfixable", "zh-TW": "無法自動修復"},
+    "status_skipped": {"en": "Skipped", "zh-TW": "已略過"},
+    "status_error": {"en": "Error", "zh-TW": "錯誤"},
+    "column_status": {"en": "Status", "zh-TW": "狀態"},
+    "column_mesh": {"en": "Mesh", "zh-TW": "網格"},
+    "column_verdict": {"en": "Before -> After", "zh-TW": "修復前 -> 修復後"},
+    "column_categories": {"en": "Categories", "zh-TW": "類別"},
+    "column_reason": {"en": "Reason", "zh-TW": "原因"},
+    "count_summary": {
+        "en": "Fixed {fixed}, failed {failed}, unfixable {unfixable}, skipped {skipped}, errors {error}",
+        "zh-TW": "已修復 {fixed}、失敗 {failed}、無法修復 {unfixable}、略過 {skipped}、錯誤 {error}",
+    },
+    "pending_summary": {"en": "Pending {count}", "zh-TW": "待處理 {count}"},
+    "open_output": {"en": "Open output folder", "zh-TW": "開啟輸出資料夾"},
+    "save_report": {"en": "Save report", "zh-TW": "開啟報告"},
+    "language": {"en": "Language", "zh-TW": "語言"},
+    "english": {"en": "English", "zh-TW": "English"},
+    "traditional_chinese": {"en": "繁體中文", "zh-TW": "繁體中文"},
+    "about": {"en": "About", "zh-TW": "關於"},
+    "about_title": {"en": "About DeadMesh Fix Tool", "zh-TW": "關於 DeadMesh 修復工具"},
+    "about_text": {
+        "en": "DeadMesh Fix Tool is GPL-3.0 software. Credits: TesFantom's DeadMesh and BadDogSkyrim's PyNifly. This is an unofficial companion and is not endorsed by either project.",
+        "zh-TW": "DeadMesh 修復工具採用 GPL-3.0 授權。特別感謝 TesFantom 的 DeadMesh 與 BadDogSkyrim 的 PyNifly。本工具是非官方的搭配工具，並未獲得上述任一專案背書。",
+    },
+    "folder_required": {
+        "en": "Select an existing target mod folder first.",
+        "zh-TW": "請先選擇現有的目標模組資料夾。",
+    },
+    "output_required": {
+        "en": "Select an output folder that is different from the target mod folder.",
+        "zh-TW": "請選擇與目標模組資料夾不同的輸出資料夾。",
+    },
+    "scan_error_title": {"en": "Scan failed", "zh-TW": "掃描失敗"},
+    "fix_error_title": {"en": "Fix run failed", "zh-TW": "修復作業失敗"},
+    "worker_error": {"en": "{type}: {message}", "zh-TW": "{type}：{message}"},
+    "run_in_progress_title": {"en": "Run in progress", "zh-TW": "作業進行中"},
+    "run_in_progress": {
+        "en": "A run is in progress and cannot be cancelled safely. Close the window automatically after it finishes?",
+        "zh-TW": "作業正在進行，無法安全取消。是否在作業完成後自動關閉視窗？",
+    },
+    "no_report": {
+        "en": "No text report is available yet.",
+        "zh-TW": "目前尚無文字報告。",
+    },
+    "information": {"en": "Information", "zh-TW": "資訊"},
+}
+
+_language = "en"
+
+
+def set_language(language: str) -> None:
+    """Select the active language."""
+    if language not in ("en", "zh-TW"):
+        raise ValueError(f"unsupported language: {language}")
+    global _language
+    _language = language
+
+
+def tr(key: str) -> str:
+    """Return a translated UI string for the active language."""
+    return STRINGS[key][_language]
