@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+# When the parent is a windowed (console-less) app, every console child would
+# otherwise pop up its own console window - one per dmscan call.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 class FixCategory(Enum):
@@ -98,6 +103,7 @@ class DmScan:
             errors="replace",
             timeout=timeout,
             cwd=str(self.deadmesh_dir),
+            creationflags=_NO_WINDOW,
         )
         # dmscan uses the exit code as a scan summary: 0 = clean, 1 = problems
         # found. Both carry valid output; only >= 2 is a real failure.
@@ -147,6 +153,7 @@ class DmScan:
             errors="replace",
             timeout=600,
             cwd=str(self.deadmesh_dir),
+            creationflags=_NO_WINDOW,
         )
         return proc.returncode != 3
 
