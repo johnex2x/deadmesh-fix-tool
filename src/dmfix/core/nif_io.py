@@ -129,11 +129,22 @@ class NifFileLayout:
         return self.data[block.offset : block.end]
 
     def replace_block(self, block_index: int, payload: bytes) -> bytes:
-        block = self.blocks[block_index]
-        patched = bytearray(self.data)
-        struct.pack_into("<I", patched, block.size_entry_offset, len(payload))
-        patched[block.offset : block.end] = payload
-        return bytes(patched)
+        return self.replace_blocks({block_index: payload})
+
+    def replace_blocks(self, replacements: dict[int, bytes]) -> bytes:
+        """Replace block payloads using offsets from this original layout."""
+        invalid = set(replacements) - set(range(len(self.blocks)))
+        if invalid:
+            raise IndexError(f"invalid NIF block indexes: {sorted(invalid)}")
+
+        header = bytearray(self.data[: self.header_end])
+        payloads: list[bytes] = []
+        for block in self.blocks:
+            payload = replacements.get(block.index, self.payload(block.index))
+            if block.index in replacements:
+                struct.pack_into("<I", header, block.size_entry_offset, len(payload))
+            payloads.append(payload)
+        return b"".join((bytes(header), *payloads, self.data[self.footer_offset :]))
 
 
 @dataclass(frozen=True)

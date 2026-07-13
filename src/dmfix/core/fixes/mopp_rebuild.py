@@ -5,7 +5,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from dmfix.core.nif_io import MOPP_FIXED_SIZE, NifFileLayout, locate_collisions, read_mopp
+from dmfix.core.nif_io import (
+    MOPP_FIXED_SIZE,
+    MoppData,
+    NifFileLayout,
+    locate_collisions,
+    read_mopp,
+)
 
 
 MOPP_SCALE_NUMERATOR = 254.0 * 256.0 * 256.0
@@ -20,6 +26,15 @@ class CollisionMesh:
     bits_per_index: int
     bits_per_w_index: int
     data_block_index: int
+    triangle_materials: tuple[int, ...] = ()
+    mask_w_index: int = 0
+    mask_index: int = 0
+    error: float = 0.001
+    welding_type: int = 0
+    material_type: int = 0
+    auxiliary_counts: tuple[int, int, int] = (0, 0, 0)
+    material_entries: tuple[tuple[int, int], ...] = ()
+    transforms: tuple[tuple[float, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,34 +64,13 @@ def rebuild_mopp(input_path: str | Path, output_path: str | Path) -> MoppRebuild
 
     old_mopp = read_mopp(layout, collision.shape_block_index)
     mesh = decode_compressed_mesh(layout, collision.child_shape_block_index)
-    compile_mopp, verifier = _load_mopp_tools()
-    new_code, origin, scale = compile_mopp(
-        mesh.vertices,
-        mesh.triangles,
-        radius=mesh.radius,
-        output_ids=list(mesh.output_ids),
-    )
-    largest_dim = MOPP_SCALE_NUMERATOR / scale
-    passed, messages = verifier.verify_all(
-        new_code,
-        origin,
-        largest_dim,
+    new_code, origin, scale, messages, verifier = _compile_verified_mopp(
         mesh.vertices,
         mesh.triangles,
         mesh.output_ids,
         mesh.radius,
     )
-    surface_ok, surface_messages = verifier.verify_surface_reachability(
-        new_code,
-        origin,
-        largest_dim,
-        mesh.vertices,
-        mesh.triangles,
-        mesh.radius,
-    )
-    messages.extend(["\n=== Surface reachability ===", *surface_messages])
-    if not passed or not surface_ok:
-        raise ValueError("rebuilt MOPP failed internal verification:\n" + "\n".join(messages))
+    largest_dim = MOPP_SCALE_NUMERATOR / scale
 
     old_largest_dim = MOPP_SCALE_NUMERATOR / old_mopp.scale
     old_false_positive_rate, _ = verifier.verify_tightness(
@@ -96,18 +90,7 @@ def rebuild_mopp(input_path: str | Path, output_path: str | Path) -> MoppRebuild
         mesh.radius,
     )
 
-    new_payload = struct.pack(
-        "<iIII f I 3f f B",
-        old_mopp.child_shape_index,
-        *old_mopp.unused,
-        old_mopp.shape_scale,
-        len(new_code),
-        *origin,
-        scale,
-        1,
-    ) + new_code
-    if len(new_payload) != MOPP_FIXED_SIZE + len(new_code):
-        raise AssertionError("incorrect MOPP payload size")
+    new_payload = _serialize_mopp(old_mopp, new_code, origin, scale)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(layout.replace_block(collision.shape_block_index, new_payload))
@@ -123,6 +106,64 @@ def rebuild_mopp(input_path: str | Path, output_path: str | Path) -> MoppRebuild
         old_false_positive_rate=old_false_positive_rate,
         new_false_positive_rate=new_false_positive_rate,
     )
+
+
+def _compile_verified_mopp(
+    vertices: tuple[tuple[float, float, float], ...],
+    triangles: tuple[tuple[int, int, int], ...],
+    output_ids: tuple[int, ...],
+    radius: float,
+):
+    compile_mopp, verifier = _load_mopp_tools()
+    code, origin, scale = compile_mopp(
+        vertices,
+        triangles,
+        radius=radius,
+        output_ids=list(output_ids),
+    )
+    largest_dim = MOPP_SCALE_NUMERATOR / scale
+    passed, messages = verifier.verify_all(
+        code,
+        origin,
+        largest_dim,
+        vertices,
+        triangles,
+        output_ids,
+        radius,
+    )
+    surface_ok, surface_messages = verifier.verify_surface_reachability(
+        code,
+        origin,
+        largest_dim,
+        vertices,
+        triangles,
+        radius,
+    )
+    messages.extend(["\n=== Surface reachability ===", *surface_messages])
+    if not passed or not surface_ok:
+        raise ValueError("MOPP failed internal verification:\n" + "\n".join(messages))
+    return code, origin, scale, messages, verifier
+
+
+def _serialize_mopp(
+    old_mopp: MoppData,
+    code: bytes,
+    origin: tuple[float, float, float],
+    scale: float,
+) -> bytes:
+    payload = struct.pack(
+        "<iIII f I 3f f B",
+        old_mopp.child_shape_index,
+        *old_mopp.unused,
+        old_mopp.shape_scale,
+        len(code),
+        *origin,
+        scale,
+        1,
+    ) + code
+    if len(payload) != MOPP_FIXED_SIZE + len(code):
+        raise AssertionError("incorrect MOPP payload size")
+    return payload
 
 
 def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> CollisionMesh:
@@ -142,15 +183,24 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
         "<4I", data, pos
     )
     pos += 16
+    error = struct.unpack_from("<f", data, pos)[0]
     pos += 4 + 16 + 16  # error and AABB vectors
-    pos += 2  # welding and material types
+    welding_type, material_type = struct.unpack_from("<2B", data, pos)
+    pos += 2
 
+    auxiliary_counts: list[int] = []
     for width in (4, 2, 1):
         count = struct.unpack_from("<I", data, pos)[0]
+        auxiliary_counts.append(count)
         pos += 4 + count * width
 
     material_count = struct.unpack_from("<I", data, pos)[0]
-    pos += 4 + material_count * 8
+    pos += 4
+    material_entries = [
+        struct.unpack_from("<2I", data, pos + index * 8)
+        for index in range(material_count)
+    ]
+    pos += material_count * 8
     named_material_count = struct.unpack_from("<I", data, pos)[0]
     pos += 4
     if named_material_count:
@@ -167,6 +217,7 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
     vertices: list[tuple[float, float, float]] = []
     triangles: list[tuple[int, int, int]] = []
     output_ids: list[int] = []
+    triangle_materials: list[int] = []
 
     big_vertex_count = struct.unpack_from("<I", data, pos)[0]
     pos += 4
@@ -179,8 +230,14 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
     pos += 4
     for triangle_index in range(big_triangle_count):
         a, b, c = struct.unpack_from("<3H", data, pos)
+        material_index = struct.unpack_from("<I", data, pos + 6)[0]
+        if material_index >= len(material_entries):
+            raise ValueError(
+                f"big triangle {triangle_index} has invalid material index {material_index}"
+            )
         triangles.append((a, b, c))
         output_ids.append(triangle_index)
+        triangle_materials.append(material_entries[material_index][0])
         pos += 12  # indices, material, welding
 
     chunk_count = struct.unpack_from("<I", data, pos)[0]
@@ -188,7 +245,11 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
     for chunk_index in range(chunk_count):
         translation = struct.unpack_from("<4f", data, pos)
         pos += 16
-        pos += 4  # material index
+        material_index = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+        if material_index >= len(material_entries):
+            raise ValueError(f"chunk {chunk_index} has invalid material index {material_index}")
+        chunk_material = material_entries[material_index][0]
         _, transform_index = struct.unpack_from("<HH", data, pos)
         pos += 4
         if transform_index >= len(transforms):
@@ -238,6 +299,7 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
                         indexes[index_position + winding + 2],
                     )
                 triangles.append(tuple(vertex_base + value for value in local))
+                triangle_materials.append(chunk_material)
                 output_ids.append(
                     chunk_prefix | ((winding & 1) << bits_per_index) | (index_position + winding)
                 )
@@ -248,6 +310,7 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
             raise ValueError(f"chunk {chunk_index} has incomplete flat triangle data")
         for flat_position in range(index_position, index_count, 3):
             triangles.append(tuple(vertex_base + indexes[flat_position + i] for i in range(3)))
+            triangle_materials.append(chunk_material)
             output_ids.append(chunk_prefix | flat_position)
 
     convex_piece_count = struct.unpack_from("<I", data, pos)[0]
@@ -265,6 +328,15 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
         bits_per_index=bits_per_index,
         bits_per_w_index=bits_per_w_index,
         data_block_index=data_block_index,
+        triangle_materials=tuple(triangle_materials),
+        mask_w_index=mask_w_index,
+        mask_index=mask_index,
+        error=error,
+        welding_type=welding_type,
+        material_type=material_type,
+        auxiliary_counts=tuple(auxiliary_counts),
+        material_entries=tuple(material_entries),
+        transforms=tuple(transforms),
     )
 
 
