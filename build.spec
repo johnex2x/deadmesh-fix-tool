@@ -31,17 +31,29 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
+# Two launchers over the same bundle: the windowed one for double-click GUI
+# use (no console window), the console one for CLI/scripting output.
+exe_gui = EXE(
     pyz,
     a.scripts,
     exclude_binaries=True,
     name="DeadMeshFixTool",
-    console=True,  # CLI mode needs a console; GUI hides it via windowed launcher note in README
+    console=False,
+    icon=None,
+)
+
+exe_cli = EXE(
+    pyz,
+    a.scripts,
+    exclude_binaries=True,
+    name="dmfix",
+    console=True,
     icon=None,
 )
 
 coll = COLLECT(
-    exe,
+    exe_gui,
+    exe_cli,
     a.binaries,
     a.datas,
     name="DeadMeshFixTool",

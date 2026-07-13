@@ -50,10 +50,13 @@ This is an unofficial companion tool. It is not made by, or endorsed by, TesFant
 
 ## Usage (command line)
 
+Use `dmfix.exe` (the console launcher in the same folder; `DeadMeshFixTool.exe` is the
+windowed GUI launcher and prints nothing to a terminal):
+
 ```
-DeadMeshFixTool.exe <mod folder> [--deadmesh <dir>] [--out <dir>]
-                    [--fix crash,heavy,degenerate,inverted,orphan_blocks]
-                    [--strength conservative|normal|aggressive] [--no-bsa]
+dmfix.exe <mod folder> [--deadmesh <dir>] [--out <dir>]
+          [--fix crash,heavy,degenerate,inverted,orphan_blocks]
+          [--strength conservative|normal|aggressive] [--no-bsa]
 ```
 
 Exit code 0 = everything fixable was fixed; 1 = some files failed/unfixable; 2 = usage error.
