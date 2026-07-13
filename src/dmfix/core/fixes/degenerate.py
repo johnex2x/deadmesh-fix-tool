@@ -23,7 +23,9 @@ class DegenerateResult:
 
 
 def fix_degenerate(
-    input_path: str | Path, output_path: str | Path
+    input_path: str | Path,
+    output_path: str | Path,
+    deadmesh_dir: str | Path | None = None,
 ) -> DegenerateResult:
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -32,7 +34,7 @@ def fix_degenerate(
     old_count = 0
     new_count = 0
     try:
-        scanner = _scanner()
+        scanner = _scanner(deadmesh_dir)
         baseline = scanner.scan_file(input_path).raw
         layout = NifFileLayout.read(input_path)
         collisions = locate_collisions(input_path)
@@ -85,7 +87,15 @@ def fix_degenerate(
         )
 
 
-def _scanner() -> DmScan:
+def _scanner(deadmesh_dir: str | Path | None = None) -> DmScan:
+    """DmScan from an explicit DeadMesh folder, or repo-relative discovery.
+
+    Callers with a configured DeadMesh location (pipeline/GUI/CLI) must pass it
+    explicitly — the discovery fallback only works from a source checkout and
+    fails in a frozen build.
+    """
+    if deadmesh_dir is not None:
+        return DmScan(deadmesh_dir)
     checkout = Path(__file__).resolve().parents[4].parent / "DeadMesh - MOPP Collision Validator"
     scanner_dir = find_deadmesh_dir([checkout])
     if scanner_dir is None:

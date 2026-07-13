@@ -23,13 +23,17 @@ class WindingResult:
     scan: dict | None
 
 
-def fix_inverted(input_path: str | Path, output_path: str | Path) -> WindingResult:
+def fix_inverted(
+    input_path: str | Path,
+    output_path: str | Path,
+    deadmesh_dir: str | Path | None = None,
+) -> WindingResult:
     input_path = Path(input_path)
     output_path = Path(output_path)
     output_path.unlink(missing_ok=True)
     baseline: dict | None = None
     try:
-        scanner = _scanner()
+        scanner = _scanner(deadmesh_dir)
         baseline = scanner.scan_file(input_path).raw
         layout = NifFileLayout.read(input_path)
         collisions = locate_collisions(input_path)

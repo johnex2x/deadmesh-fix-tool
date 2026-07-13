@@ -63,17 +63,23 @@ def _fix_functions():
     functions: dict[FixCategory, Callable] = {
         FixCategory.CRASH: lambda src, dst, **kw: rebuild_mopp(src, dst),
         FixCategory.HEAVY: lambda src, dst, **kw: simplify_collision(
-            src, dst, strength=kw.get("strength", "normal")
+            src, dst,
+            strength=kw.get("strength", "normal"),
+            deadmesh_dir=kw.get("deadmesh_dir"),
         ),
     }
     try:
         from dmfix.core.fixes.degenerate import fix_degenerate
-        functions[FixCategory.DEGENERATE] = lambda src, dst, **kw: fix_degenerate(src, dst)
+        functions[FixCategory.DEGENERATE] = lambda src, dst, **kw: fix_degenerate(
+            src, dst, deadmesh_dir=kw.get("deadmesh_dir")
+        )
     except ImportError:
         pass
     try:
         from dmfix.core.fixes.winding import fix_inverted
-        functions[FixCategory.INVERTED] = lambda src, dst, **kw: fix_inverted(src, dst)
+        functions[FixCategory.INVERTED] = lambda src, dst, **kw: fix_inverted(
+            src, dst, deadmesh_dir=kw.get("deadmesh_dir")
+        )
     except ImportError:
         pass
     try:
@@ -288,7 +294,10 @@ def _process_item(
         for category in selected:
             step_out = work_dir / f"{category.value}_{current.name}"
             result = fixes[category](
-                current, step_out, strength=options.strength
+                current,
+                step_out,
+                strength=options.strength,
+                deadmesh_dir=options.deadmesh_dir,
             )
             if not getattr(result, "success", True):
                 base.outcome = Outcome.FAILED

@@ -52,6 +52,7 @@ def simplify_collision(
     input_path: str | Path,
     output_path: str | Path,
     strength: str = "normal",
+    deadmesh_dir: str | Path | None = None,
 ) -> SimplifyResult:
     if strength not in STRENGTH_RATIOS:
         raise ValueError(f"unknown simplification strength {strength!r}")
@@ -74,13 +75,18 @@ def simplify_collision(
     if not triangles:
         raise ValueError("collision mesh has no non-degenerate triangles")
 
-    checkout_scanner = (
-        Path(__file__).resolve().parents[4].parent / "DeadMesh - MOPP Collision Validator"
-    )
-    scanner_dir = find_deadmesh_dir([checkout_scanner])
-    if scanner_dir is None:
-        raise ValueError("dmscan.exe could not be located")
-    scanner = DmScan(scanner_dir)
+    if deadmesh_dir is not None:
+        # Explicit DeadMesh location from the caller (pipeline/GUI/CLI).
+        scanner = DmScan(deadmesh_dir)
+    else:
+        # Source-checkout fallback for the test suite; fails in a frozen build.
+        checkout_scanner = (
+            Path(__file__).resolve().parents[4].parent / "DeadMesh - MOPP Collision Validator"
+        )
+        scanner_dir = find_deadmesh_dir([checkout_scanner])
+        if scanner_dir is None:
+            raise ValueError("dmscan.exe could not be located")
+        scanner = DmScan(scanner_dir)
     baseline = scanner.scan_file(input_path).raw
     old_cull_worst = int(baseline["freeze"]["cullWorst"])
     initial_target = min(
