@@ -341,9 +341,8 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
 
 
 def _load_mopp_tools():
-    vendor = Path(__file__).resolve().parents[4] / "vendor"
-    if str(vendor) not in sys.path:
-        sys.path.insert(0, str(vendor))
+    from dmfix.core.paths import ensure_vendor_on_path
+    ensure_vendor_on_path()
     import mopp_verifier
     from pyn.mopp_compiler import compile_mopp
 

@@ -242,9 +242,8 @@ def read_mopp(layout: NifFileLayout, block_index: int) -> MoppData:
 
 
 def locate_collisions(path: str | Path) -> list[CollisionInfo]:
-    vendor = Path(__file__).resolve().parents[3] / "vendor"
-    if str(vendor) not in sys.path:
-        sys.path.insert(0, str(vendor))
+    from dmfix.core.paths import ensure_vendor_on_path
+    ensure_vendor_on_path()
     from pyn.pynifly import NifFile, NiNode
 
     nif = NifFile(str(Path(path).resolve()))
