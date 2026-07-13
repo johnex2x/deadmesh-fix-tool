@@ -1,0 +1,152 @@
+"""Run dmscan.exe (DeadMesh MOPP Collision Validator) and classify its results.
+
+This tool is a downstream companion of DeadMesh: dmscan is the sole authority on
+what is broken and on whether a fix worked. We never re-derive verdicts ourselves.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+
+
+class FixCategory(Enum):
+    """Fix categories the tool can attempt, mapped from dmscan verdicts."""
+
+    CRASH = "crash"            # CRASH RISK / HANG RISK / BROKEN COLLISION -> MOPP rebuild
+    HEAVY = "heavy"            # HEAVY / VERY HEAVY COLLISION -> simplify + rebuild
+    DEGENERATE = "degenerate"  # DEGENERATE COLLISION -> drop bad tris + rebuild
+    INVERTED = "inverted"      # INVERTED COLLISION -> flip winding + rebuild
+    ORPHAN_BLOCKS = "orphan_blocks"  # unreferenced collision blocks -> remove
+    UNFIXABLE = "unfixable"    # ORPHAN MOPP: geometry stripped, nothing to rebuild from
+
+
+@dataclass
+class ScanRecord:
+    """One dmscan JSON record plus the fix categories it maps to."""
+
+    file: str                    # path as reported by dmscan (may point inside a BSA)
+    verdict: str
+    status: str
+    raw: dict
+    categories: list[FixCategory] = field(default_factory=list)
+
+    @property
+    def is_bsa_member(self) -> bool:
+        return ".bsa" in self.file.lower()
+
+    @property
+    def needs_fix(self) -> bool:
+        return bool(self.categories)
+
+
+class DmScanError(RuntimeError):
+    pass
+
+
+def classify(record: dict) -> list[FixCategory]:
+    """Map one dmscan JSON record to the fix categories it needs."""
+    verdict = record.get("verdict", "").upper()
+    categories: list[FixCategory] = []
+
+    if record.get("orphan_mopp"):
+        categories.append(FixCategory.UNFIXABLE)
+        return categories
+
+    if record.get("broken", {}).get("refs", 0) > 0 or "CRASH" in verdict or "HANG" in verdict \
+            or "BROKEN COLLISION" in verdict:
+        categories.append(FixCategory.CRASH)
+
+    cull = record.get("freeze", {}).get("cullVerdict", 0)
+    if cull >= 1 or "HEAVY" in verdict:
+        categories.append(FixCategory.HEAVY)
+
+    if record.get("degenerate", {}).get("tris", {}).get("count", 0) > 0 \
+            or "DEGENERATE" in verdict:
+        categories.append(FixCategory.DEGENERATE)
+
+    if record.get("orientation", {}).get("inverted", 0) > 0 or "INVERTED" in verdict:
+        categories.append(FixCategory.INVERTED)
+
+    if record.get("orphan_collisions", 0) > 0:
+        categories.append(FixCategory.ORPHAN_BLOCKS)
+
+    return categories
+
+
+class DmScan:
+    """Thin wrapper around dmscan.exe."""
+
+    def __init__(self, deadmesh_dir: str | Path) -> None:
+        self.deadmesh_dir = Path(deadmesh_dir)
+        self.exe = self.deadmesh_dir / "dmscan.exe"
+        if not self.exe.is_file():
+            raise DmScanError(f"dmscan.exe not found in {self.deadmesh_dir}")
+
+    def _run(self, args: list[str], timeout: int = 600) -> str:
+        proc = subprocess.run(
+            [str(self.exe), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=str(self.deadmesh_dir),
+        )
+        if proc.returncode != 0:
+            raise DmScanError(
+                f"dmscan {' '.join(args)} failed (exit {proc.returncode}): {proc.stderr[:500]}"
+            )
+        return proc.stdout
+
+    def scan_dir(self, folder: str | Path, include_bsa: bool = True) -> list[ScanRecord]:
+        """Scan a folder recursively; one ScanRecord per mesh with collision findings."""
+        args = ["--json-dir", str(Path(folder).resolve())]
+        if not include_bsa:
+            args.append("--no-bsa")
+        out = self._run(args, timeout=3600)
+        records: list[ScanRecord] = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            records.append(
+                ScanRecord(
+                    file=raw.get("file", ""),
+                    verdict=raw.get("verdict", ""),
+                    status=raw.get("status", ""),
+                    raw=raw,
+                    categories=classify(raw),
+                )
+            )
+        return records
+
+    def scan_file(self, nif_path: str | Path) -> ScanRecord:
+        """Scan a single loose .nif (used to verify a fix)."""
+        out = self._run(["--json", str(Path(nif_path).resolve())])
+        raw = json.loads(out)
+        return ScanRecord(
+            file=raw.get("file", str(nif_path)),
+            verdict=raw.get("verdict", ""),
+            status=raw.get("status", ""),
+            raw=raw,
+            categories=classify(raw),
+        )
+
+
+def find_deadmesh_dir(candidates: list[str | Path] | None = None) -> Path | None:
+    """Best-effort auto-detection of the DeadMesh install folder."""
+    default_candidates = [
+        Path(__file__).resolve().parents[4].parent / "DeadMesh - MOPP Collision Validator",
+    ]
+    for cand in [*(candidates or []), *default_candidates]:
+        cand = Path(cand)
+        if (cand / "dmscan.exe").is_file():
+            return cand
+    return None
