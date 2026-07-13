@@ -55,19 +55,23 @@ def classify(record: dict) -> list[FixCategory]:
         categories.append(FixCategory.UNFIXABLE)
         return categories
 
-    if record.get("broken", {}).get("refs", 0) > 0 or "CRASH" in verdict or "HANG" in verdict \
+    # dmscan emits null for analysis sections it did not run on a given mesh.
+    broken = record.get("broken") or {}
+    freeze = record.get("freeze") or {}
+    degenerate = record.get("degenerate") or {}
+    orientation = record.get("orientation") or {}
+
+    if broken.get("refs", 0) > 0 or "CRASH" in verdict or "HANG" in verdict \
             or "BROKEN COLLISION" in verdict:
         categories.append(FixCategory.CRASH)
 
-    cull = record.get("freeze", {}).get("cullVerdict", 0)
-    if cull >= 1 or "HEAVY" in verdict:
+    if freeze.get("cullVerdict", 0) >= 1 or "HEAVY" in verdict:
         categories.append(FixCategory.HEAVY)
 
-    if record.get("degenerate", {}).get("tris", {}).get("count", 0) > 0 \
-            or "DEGENERATE" in verdict:
+    if (degenerate.get("tris") or {}).get("count", 0) > 0 or "DEGENERATE" in verdict:
         categories.append(FixCategory.DEGENERATE)
 
-    if record.get("orientation", {}).get("inverted", 0) > 0 or "INVERTED" in verdict:
+    if orientation.get("inverted", 0) > 0 or "INVERTED" in verdict:
         categories.append(FixCategory.INVERTED)
 
     if record.get("orphan_collisions", 0) > 0:
@@ -95,7 +99,9 @@ class DmScan:
             timeout=timeout,
             cwd=str(self.deadmesh_dir),
         )
-        if proc.returncode != 0:
+        # dmscan uses the exit code as a scan summary: 0 = clean, 1 = problems
+        # found. Both carry valid output; only >= 2 is a real failure.
+        if proc.returncode not in (0, 1):
             raise DmScanError(
                 f"dmscan {' '.join(args)} failed (exit {proc.returncode}): {proc.stderr[:500]}"
             )
@@ -126,6 +132,23 @@ class DmScan:
                 )
             )
         return records
+
+    def vs_check(self, original: str | Path, rebuilt: str | Path) -> bool:
+        """dmscan --vs winding regression gate. True = rebuild is safe.
+
+        dmscan exits with code 3 when the rebuild introduced an inversion the
+        original did not have (player would fall through).
+        """
+        proc = subprocess.run(
+            [str(self.exe), "--vs", str(Path(original).resolve()), str(Path(rebuilt).resolve())],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            cwd=str(self.deadmesh_dir),
+        )
+        return proc.returncode != 3
 
     def scan_file(self, nif_path: str | Path) -> ScanRecord:
         """Scan a single loose .nif (used to verify a fix)."""
