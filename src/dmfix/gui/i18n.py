@@ -87,6 +87,13 @@ STRINGS: dict[str, dict[str, str]] = {
     "status_error": {"en": "Error", "zh-TW": "錯誤"},
     "column_status": {"en": "Status", "zh-TW": "狀態"},
     "column_mesh": {"en": "Mesh", "zh-TW": "網格"},
+    "column_selected": {"en": "Fix?", "zh-TW": "修復?"},
+    "select_all": {"en": "Check all", "zh-TW": "全選"},
+    "select_none": {"en": "Uncheck all", "zh-TW": "全不選"},
+    "nothing_selected": {
+        "en": "No rows are checked - tick the meshes you want to fix first.",
+        "zh-TW": "沒有勾選任何項目——請先勾選要修復的網格。",
+    },
     "column_verdict": {"en": "Before -> After", "zh-TW": "修復前 -> 修復後"},
     "column_categories": {"en": "Categories", "zh-TW": "類別"},
     "column_reason": {"en": "Reason", "zh-TW": "原因"},

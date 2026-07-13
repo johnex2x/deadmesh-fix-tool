@@ -39,6 +39,9 @@ class PipelineOptions:
     )
     strength: str = "normal"          # HEAVY simplification strength
     include_bsa: bool = True
+    # When set, only work items whose relative_path is in this set are
+    # processed (GUI re-run of selected rows). None = everything found.
+    only_paths: set[str] | None = None
 
 
 @dataclass
@@ -218,6 +221,9 @@ def run_pipeline(
     report.start()
 
     worklist, temp_root = collect_work_items(target_folder, options, progress)
+    if options.only_paths is not None:
+        selected = {p.replace("/", "\\").lower() for p in options.only_paths}
+        worklist = [item for item in worklist if item.relative_path in selected]
     work_root = Path(tempfile.mkdtemp(prefix="dmfix-work-"))
     try:
         for index, item in enumerate(worklist):

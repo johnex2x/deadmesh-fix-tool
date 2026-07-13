@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -272,20 +272,31 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.status_label, 2)
         layout.addLayout(action_row)
 
-        self.results_table = QTableWidget(0, 5)
+        self.results_table = QTableWidget(0, 6)
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
         header = self.results_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.results_table.itemChanged.connect(self._row_check_changed)
+        self._populating_rows = False
         layout.addWidget(self.results_table, 1)
+        selection_row = QHBoxLayout()
         self.count_label = QLabel()
-        layout.addWidget(self.count_label)
+        self.select_all_button = QPushButton()
+        self.select_none_button = QPushButton()
+        self.select_all_button.clicked.connect(lambda: self._set_all_checks(True))
+        self.select_none_button.clicked.connect(lambda: self._set_all_checks(False))
+        selection_row.addWidget(self.count_label, 1)
+        selection_row.addWidget(self.select_all_button)
+        selection_row.addWidget(self.select_none_button)
+        layout.addLayout(selection_row)
         self.failure_hint = QLabel()
         self.failure_hint.setWordWrap(True)
         self.failure_hint.setStyleSheet(
@@ -357,6 +368,7 @@ class MainWindow(QMainWindow):
         self.fix_button.setText(tr("fix"))
         self.results_table.setHorizontalHeaderLabels(
             [
+                tr("column_selected"),
                 tr("column_status"),
                 tr("column_mesh"),
                 tr("column_verdict"),
@@ -364,6 +376,8 @@ class MainWindow(QMainWindow):
                 tr("column_reason"),
             ]
         )
+        self.select_all_button.setText(tr("select_all"))
+        self.select_none_button.setText(tr("select_none"))
         self.open_output_button.setText(tr("open_output"))
         self.report_button.setText(tr("save_report"))
         self.language_label.setText(tr("language"))
@@ -472,8 +486,14 @@ class MainWindow(QMainWindow):
         target = self._valid_target()
         if target is None or not self._valid_output(target):
             return
+        checked = self._checked_paths()
+        if not checked:
+            QMessageBox.information(self, tr("app_title"), tr("nothing_selected"))
+            return
         self._cleanup_scan_temp()
-        worker = FixWorker(target, self._make_options())
+        options = self._make_options()
+        options.only_paths = checked
+        worker = FixWorker(target, options)
         self._start_worker(worker, self._fix_finished, "fix")
 
     def _start_worker(
@@ -566,14 +586,8 @@ class MainWindow(QMainWindow):
             )
 
     def _update_fix_enabled(self) -> None:
-        selected = self._selected_categories()
-        has_fixable = any(
-            item.record
-            and any(category in selected for category in item.record.categories)
-            for item in self._pending_items
-        )
         self.fix_button.setEnabled(
-            self._worker_thread is None and bool(has_fixable)
+            self._worker_thread is None and bool(self._checked_paths())
         )
 
     def _set_status(self, key: str, **values: object) -> None:
@@ -592,42 +606,83 @@ class MainWindow(QMainWindow):
         return ", ".join(labels)
 
     def _render_rows(self) -> None:
-        self.results_table.setRowCount(0)
-        if self._report is not None:
-            for result in self._report.results:
-                self._add_result_row(
-                    tr(f"status_{result.outcome.value}"),
-                    result.relative_path,
-                    f"{result.verdict_before} -> {result.verdict_after or '-'}",
-                    self._category_text(result.categories),
-                    result.reason,
-                    result.outcome,
-                )
-            counts = self._report.counts()
-            self.count_label.setText(tr("count_summary").format(**counts))
-            if counts["failed"] or counts["unfixable"] or counts["error"]:
-                self.failure_hint.setText(tr("failure_banner"))
-                self.failure_hint.show()
+        self._populating_rows = True
+        try:
+            self.results_table.setRowCount(0)
+            if self._report is not None:
+                for result in self._report.results:
+                    # After a run, only rows the user may want to retry are
+                    # checkable, and they start checked so "Fix" immediately
+                    # re-runs just the failures (e.g. with another strength).
+                    retryable = result.outcome in (Outcome.FAILED, Outcome.ERROR)
+                    self._add_result_row(
+                        tr(f"status_{result.outcome.value}"),
+                        result.relative_path,
+                        f"{result.verdict_before} -> {result.verdict_after or '-'}",
+                        self._category_text(result.categories),
+                        result.reason,
+                        result.outcome,
+                        checkable=retryable,
+                        checked=retryable,
+                    )
+                counts = self._report.counts()
+                self.count_label.setText(tr("count_summary").format(**counts))
+                if counts["failed"] or counts["unfixable"] or counts["error"]:
+                    self.failure_hint.setText(tr("failure_banner"))
+                    self.failure_hint.show()
+                else:
+                    self.failure_hint.hide()
             else:
-                self.failure_hint.hide()
-        else:
-            for item in self._pending_items:
-                record = item.record
-                if record is None:
-                    continue
-                self._add_result_row(
-                    tr("status_pending"),
-                    item.relative_path,
-                    f"{record.verdict} -> -",
-                    self._category_text(record.categories),
-                    "",
-                    None,
+                for item in self._pending_items:
+                    record = item.record
+                    if record is None:
+                        continue
+                    self._add_result_row(
+                        tr("status_pending"),
+                        item.relative_path,
+                        f"{record.verdict} -> -",
+                        self._category_text(record.categories),
+                        "",
+                        None,
+                        checkable=True,
+                        checked=True,
+                    )
+                self.count_label.setText(
+                    tr("pending_summary").format(count=len(self._pending_items))
                 )
-            self.count_label.setText(
-                tr("pending_summary").format(count=len(self._pending_items))
-            )
-            self.failure_hint.hide()
+                self.failure_hint.hide()
+        finally:
+            self._populating_rows = False
         self._update_fix_enabled()
+
+    def _checked_paths(self) -> set[str]:
+        checked: set[str] = set()
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if (
+                item is not None
+                and item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+                and item.checkState() == Qt.CheckState.Checked
+            ):
+                checked.add(self.results_table.item(row, 2).text())
+        return checked
+
+    def _set_all_checks(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self._populating_rows = True
+        try:
+            for row in range(self.results_table.rowCount()):
+                item = self.results_table.item(row, 0)
+                if item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    item.setCheckState(state)
+        finally:
+            self._populating_rows = False
+        self._update_fix_enabled()
+
+    @Slot(QTableWidgetItem)
+    def _row_check_changed(self, item: QTableWidgetItem) -> None:
+        if not self._populating_rows and item.column() == 0:
+            self._update_fix_enabled()
 
     def _add_result_row(
         self,
@@ -637,20 +692,36 @@ class MainWindow(QMainWindow):
         categories: str,
         reason: str,
         outcome: Outcome | None,
+        *,
+        checkable: bool = False,
+        checked: bool = False,
     ) -> None:
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
+        check_item = QTableWidgetItem()
+        if checkable:
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check_item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+        else:
+            check_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        self.results_table.setItem(row, 0, check_item)
         values = (status, mesh, verdict, categories, reason)
         tooltip_key = {
             Outcome.FAILED: "tooltip_failed",
             Outcome.UNFIXABLE: "tooltip_unfixable",
             Outcome.ERROR: "tooltip_error",
         }.get(outcome)
-        for column, value in enumerate(values):
+        for offset, value in enumerate(values):
             item = QTableWidgetItem(value)
             if tooltip_key:
                 item.setToolTip(tr(tooltip_key))
-            self.results_table.setItem(row, column, item)
+            self.results_table.setItem(row, offset + 1, item)
         color = {
             Outcome.FIXED: QColor("#2e7d32"),
             Outcome.FAILED: QColor("#c62828"),
@@ -659,7 +730,7 @@ class MainWindow(QMainWindow):
             Outcome.ERROR: QColor("#757575"),
             None: QColor("#757575"),
         }[outcome]
-        self.results_table.item(row, 0).setForeground(color)
+        self.results_table.item(row, 1).setForeground(color)
 
     def _open_output(self) -> None:
         folder = self.output_edit.text().strip()
