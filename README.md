@@ -1,6 +1,6 @@
 # DeadMesh Fix Tool
 
-**Automated collision fixer for meshes flagged by [DeadMesh - MOPP Collision Validator](https://www.nexusmods.com/skyrimspecialedition/) (by TesFantom).**
+**Automated collision fixer for meshes flagged by [DeadMesh - MOPP Collision Validator](https://www.nexusmods.com/skyrimspecialedition/mods/181829) (by TesFantom).**
 
 > [繁體中文說明](README.zh-TW.md)
 
@@ -37,7 +37,7 @@ This is an unofficial companion tool. It is not made by, or endorsed by, TesFant
 ## Requirements
 
 - Windows 10/11, 64-bit
-- [DeadMesh - MOPP Collision Validator](https://www.nexusmods.com/skyrimspecialedition/) installed
+- [DeadMesh - MOPP Collision Validator](https://www.nexusmods.com/skyrimspecialedition/mods/181829) installed
   (the tool asks for its folder on first run — it needs `dmscan.exe`)
 
 ## Usage (GUI)
@@ -95,7 +95,7 @@ these; dmscan.exe must be present in a sibling `DeadMesh - MOPP Collision Valida
 
 ## Credits & license
 
-- **TesFantom** — [DeadMesh - MOPP Collision Validator](https://www.nexusmods.com/skyrimspecialedition/),
+- **TesFantom** — [DeadMesh - MOPP Collision Validator](https://www.nexusmods.com/skyrimspecialedition/mods/181829),
   the detection engine this tool is built around, and the reverse-engineering research behind it.
 - **BadDogSkyrim** — [PyNifly](https://github.com/BadDogSkyrim/PyNifly). This tool vendors
   PyNifly's `pyn` package (NIF I/O, MOPP compiler/verifier, NiflyDLL) under GPL-3.0.
