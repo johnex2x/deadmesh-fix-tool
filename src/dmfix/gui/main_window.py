@@ -286,6 +286,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.results_table, 1)
         self.count_label = QLabel()
         layout.addWidget(self.count_label)
+        self.failure_hint = QLabel()
+        self.failure_hint.setWordWrap(True)
+        self.failure_hint.setStyleSheet(
+            "QLabel { background: rgba(198, 40, 40, 0.12); border: 1px solid #c62828;"
+            " border-radius: 4px; padding: 6px; }"
+        )
+        self.failure_hint.hide()
+        layout.addWidget(self.failure_hint)
 
         bottom = QHBoxLayout()
         self.open_output_button = QPushButton()
@@ -595,7 +603,13 @@ class MainWindow(QMainWindow):
                     result.reason,
                     result.outcome,
                 )
-            self.count_label.setText(tr("count_summary").format(**self._report.counts()))
+            counts = self._report.counts()
+            self.count_label.setText(tr("count_summary").format(**counts))
+            if counts["failed"] or counts["unfixable"] or counts["error"]:
+                self.failure_hint.setText(tr("failure_banner"))
+                self.failure_hint.show()
+            else:
+                self.failure_hint.hide()
         else:
             for item in self._pending_items:
                 record = item.record
@@ -612,6 +626,7 @@ class MainWindow(QMainWindow):
             self.count_label.setText(
                 tr("pending_summary").format(count=len(self._pending_items))
             )
+            self.failure_hint.hide()
         self._update_fix_enabled()
 
     def _add_result_row(
@@ -626,8 +641,16 @@ class MainWindow(QMainWindow):
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
         values = (status, mesh, verdict, categories, reason)
+        tooltip_key = {
+            Outcome.FAILED: "tooltip_failed",
+            Outcome.UNFIXABLE: "tooltip_unfixable",
+            Outcome.ERROR: "tooltip_error",
+        }.get(outcome)
         for column, value in enumerate(values):
-            self.results_table.setItem(row, column, QTableWidgetItem(value))
+            item = QTableWidgetItem(value)
+            if tooltip_key:
+                item.setToolTip(tr(tooltip_key))
+            self.results_table.setItem(row, column, item)
         color = {
             Outcome.FIXED: QColor("#2e7d32"),
             Outcome.FAILED: QColor("#c62828"),

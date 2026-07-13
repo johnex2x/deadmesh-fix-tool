@@ -95,6 +95,60 @@ STRINGS: dict[str, dict[str, str]] = {
         "zh-TW": "已修復 {fixed}、失敗 {failed}、無法修復 {unfixable}、略過 {skipped}、錯誤 {error}",
     },
     "pending_summary": {"en": "Pending {count}", "zh-TW": "待處理 {count}"},
+    "failure_banner": {
+        "en": (
+            "Some files were not fixed - your game is NOT worse off: originals are "
+            "untouched and failed files simply keep behaving as before. Options: "
+            "re-run with a different strength (e.g. Aggressive), fix manually in "
+            "Blender (see README 'Manual fallback'), or leave them - a heavy mesh "
+            "only costs frames on contact, it does not crash. Details are in the "
+            "report and in each row's tooltip."
+        ),
+        "zh-TW": (
+            "部分檔案未修復——你的遊戲不會因此變糟：原始檔完全未動，失敗的檔案只是"
+            "維持原本的行為。可行做法：換一個簡化強度重跑（例如「激進」）、依 README"
+            "的「Manual fallback」用 Blender 手動修復，或者放著不管——過重碰撞只在"
+            "接觸時掉幀，不會造成當機。詳情見報告與各列的滑鼠提示。"
+        ),
+    },
+    "tooltip_failed": {
+        "en": (
+            "The fix was attempted but DeadMesh could not certify it safe, so nothing "
+            "was written - the original file stays in effect.\n"
+            "1. Try again with a different simplification strength (Aggressive).\n"
+            "2. Fix manually in Blender + PyNifly (README: 'Manual fallback').\n"
+            "3. Or leave it: a heavy mesh costs frames on contact, it does not crash."
+        ),
+        "zh-TW": (
+            "已嘗試修復，但 DeadMesh 無法認證其安全，因此未輸出任何檔案——遊戲"
+            "沿用原始檔。\n"
+            "1. 換一個簡化強度（激進）再試一次。\n"
+            "2. 用 Blender + PyNifly 手動修復（README：「Manual fallback」）。\n"
+            "3. 或放著不管：過重碰撞只在接觸時掉幀，不會當機。"
+        ),
+    },
+    "tooltip_unfixable": {
+        "en": (
+            "The collision geometry was stripped from this file (ORPHAN MOPP); there is "
+            "nothing to rebuild from. Recreate the collision in Blender (README: "
+            "'Manual fallback') or delete the dead block in NifSkope. Harmless in game."
+        ),
+        "zh-TW": (
+            "此檔案的碰撞幾何已被刪除（ORPHAN MOPP），沒有可重建的來源。請用 Blender"
+            "重建碰撞（README：「Manual fallback」）或在 NifSkope 中刪除殘留區塊。"
+            "在遊戲中無害。"
+        ),
+    },
+    "tooltip_error": {
+        "en": (
+            "An unexpected error, not a mesh verdict. Re-run once; if it persists, "
+            "report it with deadmesh-fix-report.txt attached."
+        ),
+        "zh-TW": (
+            "非網格判定的意外錯誤。請重跑一次；若持續發生，請附上 "
+            "deadmesh-fix-report.txt 回報。"
+        ),
+    },
     "open_output": {"en": "Open output folder", "zh-TW": "開啟輸出資料夾"},
     "save_report": {"en": "Save report", "zh-TW": "開啟報告"},
     "language": {"en": "Language", "zh-TW": "語言"},

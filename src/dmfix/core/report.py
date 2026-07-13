@@ -108,6 +108,8 @@ class RunReport:
                          f"  ({', '.join(r.categories) or 'no category'})")
             if r.reason:
                 lines.append(f"          {r.reason}")
+        if counts["failed"] or counts["unfixable"] or counts["error"]:
+            lines += ["", *_failure_guidance(counts)]
         return "\n".join(lines) + "\n"
 
     def save(self, folder: str | Path) -> tuple[Path, Path]:
@@ -118,3 +120,48 @@ class RunReport:
         json_path.write_text(self.to_json(), encoding="utf-8")
         text_path.write_text(self.to_text(), encoding="utf-8")
         return json_path, text_path
+
+
+def _failure_guidance(counts: dict[str, int]) -> list[str]:
+    """Plain-language 'so what now?' section appended when anything failed."""
+    lines = [
+        "-" * 68,
+        "Some files were NOT fixed - what does that mean, and what can you do?",
+        "",
+        "First: your game is NOT worse off. This tool never modifies originals,",
+        "so a failed file simply keeps behaving exactly as it did before the run.",
+        "Note that crash-class defects (CRASH/HANG RISK) rebuild cleanly in",
+        "virtually all cases; failures are almost always the performance-class",
+        "(HEAVY) meshes, whose symptom is a frame dip on contact - not a crash.",
+        "",
+    ]
+    if counts["failed"]:
+        lines += [
+            "[FAIL] entries - the fix was attempted but could not be certified",
+            "safe by DeadMesh, so it was withheld. Your options, in order:",
+            "  1. Re-run with a different simplification strength (try",
+            "     'aggressive' in the GUI, or --strength aggressive on the CLI).",
+            "  2. Fix the mesh manually - the classic route: import into Blender",
+            "     with the PyNifly add-on, rebuild a low-poly collision, export,",
+            "     verify with DeadMesh. Step-by-step guide in README.md",
+            "     ('Manual fallback').",
+            "  3. Leave it. A HEAVY mesh only costs frames when something",
+            "     touches it; if it sits somewhere remote, it may never matter.",
+            "",
+        ]
+    if counts["unfixable"]:
+        lines += [
+            "[MANUAL] entries - the collision geometry was stripped from the",
+            "file (ORPHAN MOPP); there is nothing to rebuild from. Either",
+            "recreate the collision in Blender (README 'Manual fallback') or",
+            "delete the dead collision block in NifSkope.",
+            "",
+        ]
+    if counts["error"]:
+        lines += [
+            "[ERR] entries - an unexpected error, not a mesh verdict. Re-run",
+            "once; if it persists, please report it (attach this file) on the",
+            "mod page or the issue tracker.",
+            "",
+        ]
+    return lines
