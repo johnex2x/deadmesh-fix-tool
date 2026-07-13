@@ -15,6 +15,7 @@ from dmfix.core.fixes.mopp_rebuild import (
     _serialize_mopp,
     decode_compressed_mesh,
 )
+from dmfix.core.fixes.acceptance import simplify_scan_is_acceptable
 from dmfix.core.nif_io import NifFileLayout, locate_collisions, read_mopp
 from dmfix.core.scanner import DmScan, find_deadmesh_dir
 
@@ -124,7 +125,7 @@ def simplify_collision(
             raise AssertionError("bhkCompressedMeshShape payload changed")
 
         last_scan = scanner.scan_file(output_path).raw
-        if _scan_is_acceptable(baseline, last_scan):
+        if simplify_scan_is_acceptable(baseline, last_scan):
             return SimplifyResult(
                 success=True,
                 output_path=output_path,
@@ -468,29 +469,6 @@ def _encode_compressed_mesh(
         triangles=tuple(encoded_triangles),
         output_ids=tuple(output_ids),
     )
-
-
-def _scan_is_acceptable(baseline: dict, scan: dict) -> bool:
-    verdict = scan["verdict"].upper()
-    if (
-        scan["status"] == "BROKEN"
-        or any(word in verdict for word in ("HEAVY", "CRASH", "HANG"))
-        or scan["broken"]["refs"] != 0
-        or scan["freeze"]["cullVerdict"] >= 1
-    ):
-        return False
-    if scan["orientation"]["inverted"] > baseline["orientation"]["inverted"]:
-        return False
-    if scan["winding_cull"]["inverted"] > baseline["winding_cull"]["inverted"]:
-        return False
-    if scan["degenerate"]["tris"]["count"] > baseline["degenerate"]["tris"]["count"]:
-        return False
-    if baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
-        if scan["holes"]["count"] > baseline["holes"]["count"] * 1.25 + 10:
-            return False
-        if scan["invisible_walls"]["count"] > baseline["invisible_walls"]["count"]:
-            return False
-    return True
 
 
 def _tolerance_description(baseline: dict, scan: dict | None) -> str:

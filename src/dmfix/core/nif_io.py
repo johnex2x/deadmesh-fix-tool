@@ -32,8 +32,14 @@ class NifFileLayout:
     version: int
     user_version: int
     stream_version: int
+    block_count_offset: int
+    type_indexes_offset: int
+    size_table_offset: int
     header_end: int
     footer_offset: int
+    block_type_names: tuple[str, ...]
+    block_type_indexes: tuple[int, ...]
+    group_count: int
     blocks: tuple[NifBlock, ...]
 
     @classmethod
@@ -47,6 +53,7 @@ class NifFileLayout:
         pos += 1
         user_version = _unpack("I", data, pos)
         pos += 4
+        block_count_offset = pos
         block_count = _unpack("I", data, pos)
         pos += 4
         stream_version = _unpack("I", data, pos)
@@ -73,6 +80,7 @@ class NifFileLayout:
             block_types.append(data[pos : pos + length].decode("utf-8"))
             pos += length
 
+        type_indexes_offset = pos
         type_indexes = struct.unpack_from(f"<{block_count}H", data, pos)
         pos += block_count * 2
         size_table_offset = pos
@@ -119,8 +127,14 @@ class NifFileLayout:
             version=version,
             user_version=user_version,
             stream_version=stream_version,
+            block_count_offset=block_count_offset,
+            type_indexes_offset=type_indexes_offset,
+            size_table_offset=size_table_offset,
             header_end=header_end,
             footer_offset=footer_offset,
+            block_type_names=tuple(block_types),
+            block_type_indexes=tuple(type_indexes),
+            group_count=group_count,
             blocks=tuple(blocks),
         )
 
@@ -145,6 +159,36 @@ class NifFileLayout:
                 struct.pack_into("<I", header, block.size_entry_offset, len(payload))
             payloads.append(payload)
         return b"".join((bytes(header), *payloads, self.data[self.footer_offset :]))
+
+    def remove_trailing_blocks(self, first_index: int) -> bytes:
+        """Remove a suffix of blocks while preserving all remaining block indexes."""
+        if not 0 <= first_index < len(self.blocks):
+            raise IndexError(f"invalid first trailing block index {first_index}")
+        if self.group_count:
+            raise ValueError("NIF block groups are not supported for suffix removal")
+
+        old_size_table_end = self.size_table_offset + len(self.blocks) * 4
+        header_prefix = bytearray(self.data[: self.type_indexes_offset])
+        struct.pack_into("<I", header_prefix, self.block_count_offset, first_index)
+        header = b"".join(
+            (
+                bytes(header_prefix),
+                self.data[
+                    self.type_indexes_offset : self.type_indexes_offset + first_index * 2
+                ],
+                self.data[
+                    self.size_table_offset : self.size_table_offset + first_index * 4
+                ],
+                self.data[old_size_table_end : self.header_end],
+            )
+        )
+        return b"".join(
+            (
+                header,
+                self.data[self.header_end : self.blocks[first_index].offset],
+                self.data[self.footer_offset :],
+            )
+        )
 
 
 @dataclass(frozen=True)
