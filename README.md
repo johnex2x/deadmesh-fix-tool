@@ -2,6 +2,8 @@
 
 **Automated collision fixer for meshes flagged by [DeadMesh - MOPP Collision Validator](https://www.nexusmods.com/skyrimspecialedition/) (by TesFantom).**
 
+> [繁體中文說明](README.zh-TW.md)
+
 DeadMesh finds broken Havok collision in Skyrim SE/AE/VR `.nif` files — collision that crashes
 the game, freezes it, or tanks your framerate. It deliberately does not repair anything.
 **DeadMesh Fix Tool is the unofficial companion that does the repair step automatically**, so
@@ -79,9 +81,9 @@ py -3.11 -m venv .venv
 .venv\Scripts\python -m PyInstaller build.spec
 ```
 
-Tests (fixtures are meshes from the Midnight Sun mod, used with the community's blessing for
-repair purposes; dmscan.exe must be present in a sibling `DeadMesh - MOPP Collision Validator`
-folder):
+Tests (fixture `.nif` meshes are not included in this repository, since they are third-party mod
+assets and not ours to redistribute — place your own test meshes in `tests/fixtures/` to run
+these; dmscan.exe must be present in a sibling `DeadMesh - MOPP Collision Validator` folder):
 
 ```
 .venv\Scripts\python tests\test_mopp_rebuild.py
@@ -100,4 +102,4 @@ folder):
 - BSA reading is an original clean-room implementation of the public BSA v104/v105 format.
 
 DeadMesh Fix Tool is free software under the **GNU General Public License v3.0** (see
-`LICENSE`). Source code: <https://github.com/> (repository link on the Nexus page).
+`LICENSE`). Source code: <https://github.com/johnex2x/deadmesh-fix-tool>

@@ -7,3 +7,9 @@ dist/
 /out/
 /tmp/
 .agent/journal.md
+dmscan.log
+
+# Real third-party mod meshes used as local test fixtures - not ours to
+# redistribute. Set up your own copies locally to run the fixture tests.
+/tests/fixtures/
+/tests/fixtures_baseline.jsonl
