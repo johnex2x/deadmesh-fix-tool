@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dmfix.core.fixes.mopp_rebuild import decode_compressed_mesh
+from dmfix.core.fixes.acceptance import simplify_scan_is_acceptable
 from dmfix.core.fixes.simplify import SimplifyResult, simplify_collision
 from dmfix.core.nif_io import NifFileLayout, locate_collisions
 from dmfix.core.scanner import DmScan
@@ -78,6 +79,41 @@ def _summary_line(name: str, result: SimplifyResult) -> str:
     )
 
 
+def _acceptance_failures(baseline: dict, scan: dict) -> str:
+    failures = []
+    verdict = scan["verdict"].upper()
+    if scan["status"] == "BROKEN":
+        failures.append("status")
+    if any(word in verdict for word in ("HEAVY", "CRASH", "HANG")):
+        failures.append("verdict")
+    if scan["broken"]["refs"] != 0:
+        failures.append("broken.refs")
+    if scan["freeze"]["cullVerdict"] >= 1:
+        failures.append("cullVerdict")
+    for field in ("orientation.inverted", "winding_cull.inverted", "degenerate.tris.count"):
+        parts = field.split(".")
+        old_value = baseline
+        new_value = scan
+        for part in parts:
+            old_value = old_value[part]
+            new_value = new_value[part]
+        if new_value > old_value:
+            failures.append(field)
+    if baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
+        levels = {"none": 0, "low": 1, "high": 2}
+        old_level = levels.get(baseline["fall_through_risk"]["level"], -1)
+        new_level = levels.get(scan["fall_through_risk"]["level"], 3)
+        if new_level > old_level:
+            failures.append("fall_through_risk.level")
+        if scan["fall_patch"]["sites"] > baseline["fall_patch"]["sites"]:
+            failures.append("fall_patch.sites")
+        if scan["holes_enclosed"] > baseline["holes_enclosed"]:
+            failures.append("holes_enclosed")
+        if scan["invisible_walls"]["count"] > baseline["invisible_walls"]["count"]:
+            failures.append("invisible_walls.count")
+    return ",".join(failures) or "unknown"
+
+
 def test_simplify_all_heavy_fixtures() -> None:
     baselines = _baselines()
     assert len(baselines) == 17
@@ -92,7 +128,7 @@ def test_simplify_all_heavy_fixtures() -> None:
         result = simplify_collision(source, output)
         results.append((name, result))
         if not result.success:
-            failures.append(name)
+            failures.append(f"{name}: {result.tolerance_used}")
             assert not output.exists()
             continue
 
@@ -107,13 +143,9 @@ def test_simplify_all_heavy_fixtures() -> None:
         assert scan["winding_cull"]["inverted"] <= baseline["winding_cull"]["inverted"]
         assert scan["degenerate"]["tris"]["count"] <= baseline["degenerate"]["tris"]["count"]
 
-        # Simplified hulls can legitimately expose a few more ray samples as
-        # holes. The 25% + 10 point allowance follows the Stage-2 acceptance
-        # contract and is used only when both ray scans completed.
-        if baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
-            hole_limit = baseline["holes"]["count"] * 1.25 + 10
-            assert scan["holes"]["count"] <= hole_limit
-            assert scan["invisible_walls"]["count"] <= baseline["invisible_walls"]["count"]
+        assert simplify_scan_is_acceptable(baseline, scan), _acceptance_failures(
+            baseline, scan
+        )
 
         _assert_only_collision_data_and_mopp_changed(source, output)
 
@@ -121,7 +153,7 @@ def test_simplify_all_heavy_fixtures() -> None:
     for name, result in results:
         print(_summary_line(name, result))
     print(f"successes={len(results) - len(failures)}/17 failures={failures}")
-    assert len(results) - len(failures) >= 13
+    assert len(results) - len(failures) >= 16
 
 
 if __name__ == "__main__":

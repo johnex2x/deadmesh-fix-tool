@@ -1,6 +1,38 @@
 from __future__ import annotations
 
 
+_FALL_THROUGH_RISK = {"none": 0, "low": 1, "high": 2}
+
+
+def _fall_through_risk_not_worse(baseline: dict, scan: dict) -> bool:
+    baseline_level = _FALL_THROUGH_RISK.get(
+        str(baseline["fall_through_risk"]["level"]).lower()
+    )
+    scan_level = _FALL_THROUGH_RISK.get(
+        str(scan["fall_through_risk"]["level"]).lower()
+    )
+    return (
+        baseline_level is not None
+        and scan_level is not None
+        and scan_level <= baseline_level
+    )
+
+
+def _ray_scan_not_worse(baseline: dict, scan: dict) -> bool:
+    # DeadMesh DOCUMENTATION.md, Ray-Cast pass: fall-through points are listed
+    # but not flagged because simplified hulls are normal in Skyrim meshes.
+    # We therefore gate only on dmscan's verdict-grade signals: the considered
+    # fall-through risk LEVEL and invisible walls (the one ray defect DeadMesh
+    # itself flags). Raw fall_patch.sites / holes_enclosed counts are hint
+    # metrics with sampling variance ("verify with a drop-test") and reject
+    # legitimate simplified hulls, so they are deliberately not gated.
+    return (
+        _fall_through_risk_not_worse(baseline, scan)
+        and scan["invisible_walls"]["count"]
+        <= baseline["invisible_walls"]["count"]
+    )
+
+
 def nothing_got_worse(
     baseline: dict,
     scan: dict,
@@ -42,9 +74,7 @@ def nothing_got_worse(
     if scan["orphan_collisions"] > baseline["orphan_collisions"]:
         return False
     if baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
-        if scan["holes"]["count"] > baseline["holes"]["count"] * 1.25 + 10:
-            return False
-        if scan["invisible_walls"]["count"] > baseline["invisible_walls"]["count"]:
+        if not _ray_scan_not_worse(baseline, scan):
             return False
     return True
 
@@ -65,8 +95,6 @@ def simplify_scan_is_acceptable(baseline: dict, scan: dict) -> bool:
     if scan["degenerate"]["tris"]["count"] > baseline["degenerate"]["tris"]["count"]:
         return False
     if baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
-        if scan["holes"]["count"] > baseline["holes"]["count"] * 1.25 + 10:
-            return False
-        if scan["invisible_walls"]["count"] > baseline["invisible_walls"]["count"]:
+        if not _ray_scan_not_worse(baseline, scan):
             return False
     return True

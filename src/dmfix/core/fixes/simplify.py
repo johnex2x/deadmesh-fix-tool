@@ -96,62 +96,85 @@ def simplify_collision(
 
     last_scan: dict | None = None
     last_triangle_count = 0
-    for round_number in range(1, 4):
-        target = max(1, initial_target // (2 ** (round_number - 1)))
-        new_vertices, new_triangles, new_materials = _simplify_by_material(
-            vertices,
-            triangles,
-            materials,
-            target,
-            component_floor=(8, 2, 1)[round_number - 1],
-            aggressiveness=(6.0, 8.0, 10.0)[round_number - 1],
-        )
-        encoded = _encode_compressed_mesh(mesh, new_vertices, new_triangles, new_materials)
-        last_triangle_count = len(encoded.triangles)
-
-        code, origin, scale, _, _ = _compile_verified_mopp(
-            encoded.vertices,
-            encoded.triangles,
-            encoded.output_ids,
-            mesh.radius,
-        )
-        mopp_payload = _serialize_mopp(old_mopp, code, origin, scale)
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(
-            layout.replace_blocks(
-                {
-                    mesh.data_block_index: encoded.payload,
-                    collision.shape_block_index: mopp_payload,
-                }
+    last_round = 0
+    component_count = len(
+        _connected_face_components(list(range(len(triangles))), vertices, triangles)
+    )
+    for round_number in range(1, 5):
+        if round_number == 4:
+            if (
+                component_count <= 100
+                or last_scan is None
+                or "HEAVY" not in last_scan["verdict"].upper()
+            ):
+                break
+        target_round = min(round_number, 3)
+        target = max(1, initial_target // (2 ** (target_round - 1)))
+        # Try pure decimation first: hulls rescue many-island meshes but can
+        # add invisible walls over concave islands, so they are the fallback,
+        # not the default. Round 4 exists only for many-island meshes, where
+        # pure decimation has already failed three times.
+        if round_number == 4:
+            hull_variants: tuple[int, ...] = (64,)
+        else:
+            hull_variants = (0, 16)
+        for hull_threshold in hull_variants:
+            new_vertices, new_triangles, new_materials = _simplify_by_material(
+                vertices,
+                triangles,
+                materials,
+                target,
+                component_floor=(8, 2, 1)[target_round - 1],
+                aggressiveness=(6.0, 8.0, 10.0)[target_round - 1],
+                hull_threshold=hull_threshold,
             )
-        )
-        output_layout = NifFileLayout.read(output_path)
-        if output_layout.payload(collision.child_shape_block_index) != shape_payload:
-            raise AssertionError("bhkCompressedMeshShape payload changed")
+            encoded = _encode_compressed_mesh(mesh, new_vertices, new_triangles, new_materials)
+            last_triangle_count = len(encoded.triangles)
 
-        last_scan = scanner.scan_file(output_path).raw
-        if simplify_scan_is_acceptable(baseline, last_scan):
-            return SimplifyResult(
-                success=True,
-                output_path=output_path,
-                rounds=round_number,
-                old_triangle_count=len(mesh.triangles),
-                new_triangle_count=last_triangle_count,
-                old_cull_worst=old_cull_worst,
-                new_cull_worst=int(last_scan["freeze"]["cullWorst"]),
-                cull_verdict=int(last_scan["freeze"]["cullVerdict"]),
-                verdict=last_scan["verdict"],
-                verifier_passed=True,
-                welding_arrays_empty=True,
-                tolerance_used=_tolerance_description(baseline, last_scan),
+            code, origin, scale, _, _ = _compile_verified_mopp(
+                encoded.vertices,
+                encoded.triangles,
+                encoded.output_ids,
+                mesh.radius,
             )
+            mopp_payload = _serialize_mopp(old_mopp, code, origin, scale)
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(
+                layout.replace_blocks(
+                    {
+                        mesh.data_block_index: encoded.payload,
+                        collision.shape_block_index: mopp_payload,
+                    }
+                )
+            )
+            output_layout = NifFileLayout.read(output_path)
+            if output_layout.payload(collision.child_shape_block_index) != shape_payload:
+                raise AssertionError("bhkCompressedMeshShape payload changed")
+
+            last_scan = scanner.scan_file(output_path).raw
+            last_round = round_number
+            if simplify_scan_is_acceptable(baseline, last_scan):
+                return SimplifyResult(
+                    success=True,
+                    output_path=output_path,
+                    rounds=round_number,
+                    old_triangle_count=len(mesh.triangles),
+                    new_triangle_count=last_triangle_count,
+                    old_cull_worst=old_cull_worst,
+                    new_cull_worst=int(last_scan["freeze"]["cullWorst"]),
+                    cull_verdict=int(last_scan["freeze"]["cullVerdict"]),
+                    verdict=last_scan["verdict"],
+                    verifier_passed=True,
+                    welding_arrays_empty=True,
+                    tolerance_used=_tolerance_description(baseline, last_scan),
+                )
 
     output_path.unlink(missing_ok=True)
     return SimplifyResult(
         success=False,
         output_path=output_path,
-        rounds=3,
+        rounds=last_round,
         old_triangle_count=len(mesh.triangles),
         new_triangle_count=last_triangle_count,
         old_cull_worst=old_cull_worst,
@@ -189,6 +212,7 @@ def _simplify_by_material(
     target_count: int,
     component_floor: int = 8,
     aggressiveness: float = 6.0,
+    hull_threshold: int = 16,
 ) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]], list[int]]:
     groups: dict[int, list[int]] = defaultdict(list)
     for face_index, material in enumerate(materials):
@@ -203,6 +227,7 @@ def _simplify_by_material(
         material_triangle_start = len(result_triangles)
         group_target = round(target_count * len(face_indexes) / len(triangles))
         group_target = min(len(face_indexes), max(8, group_target))
+        material_hull_used = False
         for component in _connected_face_components(face_indexes, vertices, triangles):
             component_target = round(group_target * len(component) / len(face_indexes))
             component_target = min(len(component), max(component_floor, component_target))
@@ -223,13 +248,44 @@ def _simplify_by_material(
                 dtype=np.int32,
             )
             faces = original_faces
-            if component_target < len(faces):
+            is_small_island = len(component) < hull_threshold
+            hull = _convex_hull(points) if is_small_island else None
+            # A hull over an open/concave island can hold MORE triangles than
+            # the island itself and adds collision where nothing is drawn
+            # (invisible walls, which dmscan flags). Only take the hull when it
+            # actually reduces the triangle count.
+            if hull is not None and len(hull) >= len(component):
+                hull = None
+            was_simplified = False
+            if hull is not None:
+                material_hull_used = True
+                faces = np.asarray(hull, dtype=np.int32)
+            elif not is_small_island and component_target < len(faces):
                 points, faces = fast_simplification.simplify(
                     points,
                     faces,
                     target_count=component_target,
                     agg=aggressiveness,
                 )
+                was_simplified = True
+
+            if was_simplified:
+                faces = _repair_component_orientation(
+                    points, faces, np.asarray(used_keys, dtype=np.float64), original_faces
+                )
+                # Collapsing sliver triangles can fling a vertex far off the
+                # original surface; the spike then reads as collision where
+                # nothing is drawn (invisible wall, ~0.5 Havok unit = 35
+                # Skyrim units at dmscan's default gap). Revert the whole
+                # component if any decimated vertex drifted implausibly far
+                # from the component's original vertex cloud.
+                original_points = np.asarray(used_keys, dtype=np.float64)
+                if len(points) and _max_nearest_distance(
+                    np.asarray(points, dtype=np.float64), original_points
+                ) > 0.35:
+                    points = original_points
+                    faces = original_faces
+                    was_simplified = False
 
             valid_faces = []
             for face in faces:
@@ -240,7 +296,10 @@ def _simplify_by_material(
                 cross = np.cross(b - a, c - a)
                 if float(np.dot(cross, cross)) > 1e-24:
                     valid_faces.append(triangle)
-            if len(valid_faces) < min(component_floor, len(component)):
+            required_component_faces = (
+                4 if hull is not None else min(component_floor, len(component))
+            )
+            if len(valid_faces) < required_component_faces:
                 points = np.asarray(used_keys, dtype=np.float64)
                 valid_faces = [
                     tuple(int(index) for index in face) for face in original_faces
@@ -254,7 +313,10 @@ def _simplify_by_material(
             result_materials.extend([material] * len(valid_faces))
 
         required = min(8, len(face_indexes))
-        if len(result_triangles) - material_triangle_start < required:
+        if (
+            not material_hull_used
+            and len(result_triangles) - material_triangle_start < required
+        ):
             del result_vertices[material_vertex_start:]
             del result_triangles[material_triangle_start:]
             del result_materials[material_triangle_start:]
@@ -267,6 +329,135 @@ def _simplify_by_material(
             )
             result_materials.extend([material] * len(face_indexes))
     return result_vertices, result_triangles, result_materials
+
+
+def _repair_component_orientation(
+    points: np.ndarray,
+    faces: np.ndarray,
+    source_points: np.ndarray,
+    source_faces: np.ndarray,
+) -> np.ndarray:
+    if not len(faces):
+        return faces
+    source_triangles = source_points[source_faces]
+    source_centroids = source_triangles.mean(axis=1)
+    source_normals = np.cross(
+        source_triangles[:, 1] - source_triangles[:, 0],
+        source_triangles[:, 2] - source_triangles[:, 0],
+    )
+    sample_indexes = np.linspace(
+        0, len(faces) - 1, min(50, len(faces)), dtype=np.int32
+    )
+    disagreements = 0
+    compared = 0
+    for face_index in sample_indexes:
+        triangle = points[faces[face_index]]
+        centroid = triangle.mean(axis=0)
+        nearest = int(np.argmin(np.sum((source_centroids - centroid) ** 2, axis=1)))
+        normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+        dot = float(np.dot(normal, source_normals[nearest]))
+        if dot != 0.0:
+            compared += 1
+            disagreements += dot < 0.0
+    if disagreements > compared / 2:
+        return faces[:, [0, 2, 1]]
+    return faces
+
+
+def _convex_hull(points: np.ndarray) -> list[tuple[int, int, int]] | None:
+    if len(points) < 4:
+        return None
+    span = float(np.max(np.ptp(points, axis=0)))
+    epsilon = max(1e-10, span * 1e-9)
+    first = int(np.argmin(points[:, 0]))
+    distances = np.sum((points - points[first]) ** 2, axis=1)
+    second = int(np.argmax(distances))
+    if distances[second] <= epsilon * epsilon:
+        return None
+    line = points[second] - points[first]
+    line_distances = np.linalg.norm(np.cross(points - points[first], line), axis=1)
+    third = int(np.argmax(line_distances))
+    if line_distances[third] <= epsilon * np.linalg.norm(line):
+        return None
+    plane_normal = np.cross(points[second] - points[first], points[third] - points[first])
+    plane_distances = np.abs((points - points[first]) @ plane_normal)
+    fourth = int(np.argmax(plane_distances))
+    if plane_distances[fourth] <= epsilon * np.linalg.norm(plane_normal):
+        return None
+
+    interior = points[[first, second, third, fourth]].mean(axis=0)
+
+    def outward(face: tuple[int, int, int]) -> tuple[int, int, int]:
+        a, b, c = (points[index] for index in face)
+        if float(np.dot(np.cross(b - a, c - a), interior - a)) > 0.0:
+            return (face[0], face[2], face[1])
+        return face
+
+    faces = [
+        outward(face)
+        for face in (
+            (first, second, third),
+            (first, fourth, second),
+            (second, fourth, third),
+            (third, fourth, first),
+        )
+    ]
+    initial = {first, second, third, fourth}
+    candidates = [index for index in range(len(points)) if index not in initial]
+    while True:
+        eye = None
+        best_distance = epsilon
+        for point_index in candidates:
+            for face in faces:
+                a, b, c = (points[index] for index in face)
+                normal = np.cross(b - a, c - a)
+                distance = float(np.dot(normal, points[point_index] - a)) / float(
+                    np.linalg.norm(normal)
+                )
+                if distance > best_distance:
+                    eye = point_index
+                    best_distance = distance
+        if eye is None:
+            break
+        visible = []
+        for face in faces:
+            a, b, c = (points[index] for index in face)
+            normal = np.cross(b - a, c - a)
+            if float(np.dot(normal, points[eye] - a)) > epsilon * float(
+                np.linalg.norm(normal)
+            ):
+                visible.append(face)
+        horizon: dict[tuple[int, int], tuple[int, int]] = {}
+        for face in visible:
+            for edge in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+                key = tuple(sorted(edge))
+                if key in horizon:
+                    del horizon[key]
+                else:
+                    horizon[key] = edge
+        faces = [face for face in faces if face not in visible]
+        faces.extend(outward((edge[0], edge[1], eye)) for edge in horizon.values())
+        candidates.remove(eye)
+
+    volume = sum(
+        float(np.dot(points[a], np.cross(points[b], points[c])))
+        for a, b, c in faces
+    ) / 6.0
+    if volume < 0.0:
+        faces = [(a, c, b) for a, b, c in faces]
+    return faces
+
+
+def _max_nearest_distance(points: np.ndarray, reference: np.ndarray) -> float:
+    """Largest distance from any point to its nearest reference point (Havok units)."""
+    worst = 0.0
+    # Chunked to bound memory on large components.
+    for start in range(0, len(points), 256):
+        block = points[start : start + 256]
+        deltas = block[:, None, :] - reference[None, :, :]
+        nearest = np.sqrt((deltas * deltas).sum(axis=2)).min(axis=1)
+        worst = max(worst, float(nearest.max()))
+    return worst
 
 
 def _connected_face_components(
@@ -478,7 +669,44 @@ def _encode_compressed_mesh(
 
 
 def _tolerance_description(baseline: dict, scan: dict | None) -> str:
-    if scan and baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
-        limit = baseline["holes"]["count"] * 1.25 + 10
-        return f"holes {scan['holes']['count']} <= {limit:g} (baseline +25% +10)"
-    return "ray tolerance not evaluated"
+    if scan is None:
+        return "not scanned"
+    failures = []
+    verdict = scan["verdict"].upper()
+    if scan["status"] == "BROKEN":
+        failures.append("status=BROKEN")
+    if any(word in verdict for word in ("HEAVY", "CRASH", "HANG")):
+        failures.append(f"verdict={scan['verdict']}")
+    if scan["broken"]["refs"] != 0:
+        failures.append(f"broken.refs={scan['broken']['refs']}")
+    if scan["freeze"]["cullVerdict"] >= 1:
+        failures.append(f"cullVerdict={scan['freeze']['cullVerdict']}")
+    for section, field in (
+        ("orientation", "inverted"),
+        ("winding_cull", "inverted"),
+        ("degenerate", "tris"),
+    ):
+        old = baseline[section][field]
+        new = scan[section][field]
+        if field == "tris":
+            old = old["count"]
+            new = new["count"]
+        if new > old:
+            failures.append(f"{section}.{field}={new}>{old}")
+    if baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
+        levels = {"none": 0, "low": 1, "high": 2}
+        old_level = baseline["fall_through_risk"]["level"]
+        new_level = scan["fall_through_risk"]["level"]
+        if levels.get(new_level, math.inf) > levels.get(old_level, -math.inf):
+            failures.append(f"fall_through_risk.level={new_level}>{old_level}")
+        for section, field in (
+            ("fall_patch", "sites"),
+            (None, "holes_enclosed"),
+            ("invisible_walls", "count"),
+        ):
+            old = baseline[field] if section is None else baseline[section][field]
+            new = scan[field] if section is None else scan[section][field]
+            if new > old:
+                name = field if section is None else f"{section}.{field}"
+                failures.append(f"{name}={new}>{old}")
+    return ", ".join(failures) or "accepted"
