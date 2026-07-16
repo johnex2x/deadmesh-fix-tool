@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import threading
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -18,6 +20,77 @@ from dmfix.core.report import FileResult, Outcome, RunReport
 from dmfix.core.scanner import DmScan, FixCategory, ScanRecord
 
 ProgressCallback = Callable[[str, int, int, str], None]
+
+
+class PipelineEventKind(Enum):
+    ITEM_STARTED = "item_started"
+    ITEM_PROGRESS = "item_progress"
+    ITEM_COMPLETED = "item_completed"
+    RUN_PAUSED = "run_paused"
+    RUN_RESUMED = "run_resumed"
+    RUN_STOPPED = "run_stopped"
+    RUN_FINISHED = "run_finished"
+
+
+@dataclass(frozen=True)
+class PipelineEvent:
+    kind: PipelineEventKind
+    current: int
+    total: int
+    relative_path: str = ""
+    result: FileResult | None = None
+    message: str = ""
+
+
+EventCallback = Callable[[PipelineEvent], None]
+
+
+class StopRequested(RuntimeError):
+    """Raised at a safe internal checkpoint after the user requests Stop."""
+
+
+class RunControl:
+    """Thread-safe cooperative pause and safe-checkpoint stop control."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._paused = False
+        self._stop_requested = False
+
+    @property
+    def is_paused(self) -> bool:
+        with self._condition:
+            return self._paused
+
+    @property
+    def is_stop_requested(self) -> bool:
+        with self._condition:
+            return self._stop_requested
+
+    def request_pause(self) -> None:
+        with self._condition:
+            self._paused = True
+
+    def resume(self) -> None:
+        with self._condition:
+            self._paused = False
+            self._condition.notify_all()
+
+    def request_stop(self) -> None:
+        with self._condition:
+            self._stop_requested = True
+            self._paused = False
+            self._condition.notify_all()
+
+    def checkpoint(self) -> bool:
+        with self._condition:
+            while self._paused and not self._stop_requested:
+                self._condition.wait()
+            return not self._stop_requested
+
+    def raise_if_stopped(self) -> None:
+        if self.is_stop_requested:
+            raise StopRequested
 
 # Order matters: structural crash repair first, then geometry cleanups, then
 # the (geometry-changing) simplification, orphan-block removal last.
@@ -46,11 +119,40 @@ class PipelineOptions:
 
 @dataclass
 class WorkItem:
-    relative_path: str                # meshes\... (windows separators, lowercase)
+    # Lowercase Windows-style path below the selected folder. Standard mod
+    # roots may retain one leading meshes\ component; output joining removes it.
+    relative_path: str
     source_kind: str                  # "loose" | "bsa"
     source_path: Path                 # loose file, or the .bsa archive
     bsa_inner_path: str = ""          # set when source_kind == "bsa"
     record: ScanRecord | None = None
+
+
+def ensure_mesh_output_dir(output_dir: Path) -> Path:
+    """Append Meshes unless the selected output is already that directory."""
+    return (
+        output_dir
+        if output_dir.name.casefold() == "meshes"
+        else output_dir / "Meshes"
+    )
+
+
+def default_mesh_output_dir(target_folder: Path) -> Path:
+    """Return the MO2-ready mesh root used by GUI and CLI defaults."""
+    return ensure_mesh_output_dir(target_folder / "DeadMesh-Fixed")
+
+
+def mesh_output_path(output_dir: Path, relative_path: str) -> Path:
+    """Join a work-item path beneath a mesh root without duplicating `meshes`."""
+    parts = Path(relative_path.replace("\\", "/")).parts
+    if parts and parts[0].casefold() == "meshes":
+        parts = parts[1:]
+    return output_dir.joinpath(*parts)
+
+
+def report_output_dir(output_dir: Path) -> Path:
+    """Keep reports beside an MO2-ready `Meshes` folder, not inside it."""
+    return output_dir.parent if output_dir.name.casefold() == "meshes" else output_dir
 
 
 def _fix_functions():
@@ -69,6 +171,8 @@ def _fix_functions():
             src, dst,
             strength=kw.get("strength", "normal"),
             deadmesh_dir=kw.get("deadmesh_dir"),
+            stop_check=kw.get("stop_check"),
+            item_progress=kw.get("item_progress"),
         ),
     }
     try:
@@ -95,14 +199,20 @@ def _fix_functions():
     return functions
 
 
-def _relative_mesh_path(file_path: str) -> str:
-    """Extract the meshes\\... suffix from a dmscan-reported absolute path."""
+def _relative_mesh_path(file_path: str, scan_root: Path | None = None) -> str:
+    """Keep paths below the meshes directory or the selected scan folder."""
     normalized = file_path.replace("/", "\\").lower()
     marker = "\\meshes\\"
     index = normalized.rfind(marker)
     if index < 0:
         if normalized.startswith("meshes\\"):
             return normalized
+        if scan_root is not None:
+            try:
+                relative = Path(file_path).resolve().relative_to(scan_root.resolve())
+                return str(relative).replace("/", "\\").lower()
+            except ValueError:
+                pass
         return Path(normalized).name
     return normalized[index + 1 :]
 
@@ -159,7 +269,7 @@ def _collect_work_items(
     # beats lower.
     items: dict[str, WorkItem] = {}
     for record in loose_records:
-        rel = _relative_mesh_path(record.file)
+        rel = _relative_mesh_path(record.file, target_folder)
         items[rel] = WorkItem(
             relative_path=rel,
             source_kind="loose",
@@ -197,7 +307,7 @@ def _collect_work_items(
                 continue
             progress("scan", bsa_index, len(bsa_files), f"{bsa_path.name} (extracted)")
             for record in scanner.scan_dir(extract_dir):
-                rel = _relative_mesh_path(record.file)
+                rel = _relative_mesh_path(record.file, extract_dir)
                 existing = items.get(rel)
                 if existing and existing.source_kind == "loose":
                     continue  # loose wins at runtime; the BSA copy is never loaded
@@ -219,8 +329,14 @@ def run_pipeline(
     target_folder: str | Path,
     options: PipelineOptions,
     progress: ProgressCallback | None = None,
+    *,
+    control: RunControl | None = None,
+    on_event: EventCallback | None = None,
+    work_items: list[WorkItem] | None = None,
 ) -> RunReport:
     progress = progress or (lambda *_: None)
+    control = control or RunControl()
+    on_event = on_event or (lambda _event: None)
     target_folder = Path(target_folder)
     scanner = DmScan(options.deadmesh_dir)
     fixes = _fix_functions()
@@ -231,25 +347,151 @@ def run_pipeline(
     )
     report.start()
 
-    worklist, temp_root = collect_work_items(target_folder, options, progress)
+    temp_root: Path | None = None
+    if work_items is None:
+        worklist, temp_root = collect_work_items(target_folder, options, progress)
+    else:
+        worklist = list(work_items)
     if options.only_paths is not None:
         selected = {p.replace("/", "\\").lower() for p in options.only_paths}
         worklist = [item for item in worklist if item.relative_path in selected]
+    report.total_items = len(worklist)
     work_root = Path(tempfile.mkdtemp(prefix="dmfix-work-"))
     try:
         for index, item in enumerate(worklist):
+            was_paused = control.is_paused
+            if was_paused:
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_PAUSED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
+            if not control.checkpoint():
+                report.status = "stopped"
+                for pending in worklist[index:]:
+                    report.results.append(_not_run_result(pending))
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_STOPPED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
+                break
+            if was_paused:
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_RESUMED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
             record = item.record
             assert record is not None
             progress("fix", index, len(worklist), item.relative_path)
-            result = _process_item(item, record, options, fixes, scanner, work_root)
+            on_event(
+                PipelineEvent(
+                    PipelineEventKind.ITEM_STARTED,
+                    index,
+                    len(worklist),
+                    item.relative_path,
+                )
+            )
+            def item_progress(message: str) -> None:
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.ITEM_PROGRESS,
+                        report.processed_items,
+                        report.total_items,
+                        item.relative_path,
+                        message=message,
+                    )
+                )
+
+            try:
+                result = _process_item(
+                    item,
+                    record,
+                    options,
+                    fixes,
+                    scanner,
+                    work_root,
+                    control.raise_if_stopped,
+                    item_progress,
+                )
+            except StopRequested:
+                result = _not_run_result(
+                    item, "run stopped during this file at a safe checkpoint"
+                )
+                report.results.append(result)
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.ITEM_COMPLETED,
+                        report.processed_items,
+                        report.total_items,
+                        item.relative_path,
+                        result,
+                    )
+                )
+                for pending in worklist[index + 1 :]:
+                    report.results.append(_not_run_result(pending))
+                report.status = "stopped"
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_STOPPED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
+                break
             report.results.append(result)
+            report.processed_items += 1
+            on_event(
+                PipelineEvent(
+                    PipelineEventKind.ITEM_COMPLETED,
+                    report.processed_items,
+                    len(worklist),
+                    item.relative_path,
+                    result,
+                )
+            )
+        else:
+            on_event(
+                PipelineEvent(
+                    PipelineEventKind.RUN_FINISHED,
+                    report.processed_items,
+                    report.total_items,
+                )
+            )
     finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
+        if temp_root is not None:
+            shutil.rmtree(temp_root, ignore_errors=True)
         shutil.rmtree(work_root, ignore_errors=True)
 
     report.finish()
-    report.save(options.output_dir)
+    report.save(report_output_dir(options.output_dir))
     return report
+
+
+def _not_run_result(
+    item: WorkItem, reason: str = "run stopped before this file started"
+) -> FileResult:
+    record = item.record
+    assert record is not None
+    return FileResult(
+        source=(
+            f"{item.source_path}::{item.bsa_inner_path}"
+            if item.source_kind == "bsa"
+            else str(item.source_path)
+        ),
+        relative_path=item.relative_path,
+        categories=[category.value for category in record.categories],
+        outcome=Outcome.NOT_RUN,
+        reason=reason,
+        verdict_before=record.verdict,
+    )
 
 
 def _process_item(
@@ -259,6 +501,8 @@ def _process_item(
     fixes: dict[FixCategory, Callable],
     scanner: DmScan,
     work_root: Path,
+    stop_check: Callable[[], None],
+    item_progress: Callable[[str], None],
 ) -> FileResult:
     categories = [c for c in CATEGORY_ORDER if c in record.categories]
     base = FileResult(
@@ -309,13 +553,17 @@ def _process_item(
 
         detail: dict = {}
         for category in selected:
+            stop_check()
             step_out = work_dir / f"{category.value}_{current.name}"
             result = fixes[category](
                 current,
                 step_out,
                 strength=options.strength,
                 deadmesh_dir=options.deadmesh_dir,
+                stop_check=stop_check,
+                item_progress=item_progress,
             )
+            stop_check()
             if not getattr(result, "success", True):
                 base.outcome = Outcome.FAILED
                 base.reason = (
@@ -327,6 +575,8 @@ def _process_item(
             detail[category.value] = _result_detail(result)
             current = step_out
 
+        item_progress("final DeadMesh scan")
+        stop_check()
         final = scanner.scan_file(current)
         base.verdict_after = final.verdict
         remaining = [c for c in final.categories if c in selected]
@@ -343,6 +593,8 @@ def _process_item(
             base.reason = "fix introduced a crash-class defect; output withheld"
             base.detail = detail
             return base
+        item_progress("final regression check")
+        stop_check()
         if not scanner.vs_check(original, current):
             base.outcome = Outcome.FAILED
             base.reason = (
@@ -352,13 +604,15 @@ def _process_item(
             base.detail = detail
             return base
 
-        destination = options.output_dir / Path(item.relative_path)
+        destination = mesh_output_path(options.output_dir, item.relative_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(current, destination)
         base.outcome = Outcome.FIXED
         base.output_path = str(destination)
         base.detail = detail
         return base
+    except StopRequested:
+        raise
     except Exception as error:  # fail closed per file, keep the run going
         base.outcome = Outcome.ERROR
         base.reason = f"{type(error).__name__}: {error}"

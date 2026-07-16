@@ -25,7 +25,7 @@ This is an unofficial companion tool. It is not made by, or endorsed by, TesFant
 ## The safety contract
 
 1. **Your originals are never modified.** Fixed meshes are written as loose files to a separate
-   output folder (default `<mod>\DeadMesh-Fixed`), mirroring the `meshes\...` tree so you can
+   mesh output folder (default `<mod>\DeadMesh-Fixed\Meshes`), mirroring the paths below `meshes\...` so you can
    drop them into your Data folder or a mod-manager mod. BSA archives are read, never written.
 2. **DeadMesh is the judge, not us.** After every fix the tool re-scans the result with
    DeadMesh's own `dmscan` engine. A file is only written when the original defect is gone

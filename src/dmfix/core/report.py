@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from dmfix import __version__
+
 
 class Outcome(Enum):
     FIXED = "fixed"              # verified by dmscan, written to output
@@ -19,6 +21,7 @@ class Outcome(Enum):
     UNFIXABLE = "unfixable"      # e.g. ORPHAN MOPP: geometry gone, manual work needed
     SKIPPED = "skipped"          # category not selected by the user
     ERROR = "error"              # unexpected exception; details in `reason`
+    NOT_RUN = "not_run"          # run stopped before this file started
 
 
 @dataclass
@@ -44,6 +47,9 @@ class RunReport:
     output_folder: str
     started: str = ""
     finished: str = ""
+    status: str = "completed"
+    total_items: int = 0
+    processed_items: int = 0
     results: list[FileResult] = field(default_factory=list)
 
     def start(self) -> None:
@@ -62,10 +68,14 @@ class RunReport:
         return json.dumps(
             {
                 "tool": "DeadMesh Fix Tool",
+                "tool_version": __version__,
                 "scanned_folder": self.scanned_folder,
                 "output_folder": self.output_folder,
                 "started": self.started,
                 "finished": self.finished,
+                "run_status": self.status,
+                "total_items": self.total_items,
+                "processed_items": self.processed_items,
                 "counts": self.counts(),
                 "results": [
                     {
@@ -90,19 +100,25 @@ class RunReport:
         counts = self.counts()
         lines = [
             "DeadMesh Fix Tool - run report",
+            f"version  : {__version__}",
             f"scanned : {self.scanned_folder}",
             f"output  : {self.output_folder}",
             f"started : {self.started}   finished: {self.finished}",
             (
+                f"status  : {self.status}   processed: "
+                f"{self.processed_items}/{self.total_items}"
+            ),
+            (
                 f"fixed {counts['fixed']}  failed {counts['failed']}  "
                 f"unfixable {counts['unfixable']}  skipped {counts['skipped']}  "
-                f"errors {counts['error']}"
+                f"errors {counts['error']}  not run {counts['not_run']}"
             ),
             "",
         ]
         for r in self.results:
             mark = {"fixed": "[OK]", "failed": "[FAIL]", "unfixable": "[MANUAL]",
-                    "skipped": "[SKIP]", "error": "[ERR]"}[r.outcome.value]
+                    "skipped": "[SKIP]", "error": "[ERR]",
+                    "not_run": "[STOP]"}[r.outcome.value]
             lines.append(f"{mark:9s} {r.relative_path}")
             lines.append(f"          {r.verdict_before} -> {r.verdict_after or '-'}"
                          f"  ({', '.join(r.categories) or 'no category'})")

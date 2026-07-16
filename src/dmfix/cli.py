@@ -12,7 +12,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from dmfix.core.pipeline import CATEGORY_ORDER, PipelineOptions, run_pipeline
+from dmfix import __version__
+from dmfix.core.pipeline import (
+    CATEGORY_ORDER,
+    PipelineOptions,
+    default_mesh_output_dir,
+    ensure_mesh_output_dir,
+    run_pipeline,
+)
 from dmfix.core.scanner import DmScanError, FixCategory, find_deadmesh_dir
 
 FIXABLE = [c.value for c in CATEGORY_ORDER]
@@ -27,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
             "files to the output folder; originals are never modified."
         ),
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("folder", help="mod folder to scan (recursively, incl. BSA)")
     parser.add_argument(
         "--deadmesh",
@@ -34,7 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--out",
-        help="output folder for fixed loose files (default: <folder>\\DeadMesh-Fixed)",
+        help=(
+            "mesh output folder for fixed loose files "
+            "(default: <folder>\\DeadMesh-Fixed\\Meshes)"
+        ),
     )
     parser.add_argument(
         "--fix",
@@ -83,7 +94,11 @@ def main(argv: list[str] | None = None) -> int:
 
     options = PipelineOptions(
         deadmesh_dir=Path(deadmesh),
-        output_dir=Path(args.out) if args.out else target / "DeadMesh-Fixed",
+        output_dir=(
+            ensure_mesh_output_dir(Path(args.out))
+            if args.out
+            else default_mesh_output_dir(target)
+        ),
         categories=categories,
         strength=args.strength,
         include_bsa=not args.no_bsa,
@@ -101,7 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(report.to_text())
     counts = report.counts()
-    return 1 if counts["failed"] or counts["error"] or counts["unfixable"] else 0
+    return 1 if (
+        report.status == "stopped"
+        or counts["failed"]
+        or counts["error"]
+        or counts["unfixable"]
+    ) else 0
 
 
 if __name__ == "__main__":
