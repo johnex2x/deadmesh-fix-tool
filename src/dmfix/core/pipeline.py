@@ -109,11 +109,40 @@ class PipelineOptions:
 
 @dataclass
 class WorkItem:
-    relative_path: str                # meshes\... (windows separators, lowercase)
+    # Lowercase Windows-style path below the selected folder. Standard mod
+    # roots may retain one leading meshes\ component; output joining removes it.
+    relative_path: str
     source_kind: str                  # "loose" | "bsa"
     source_path: Path                 # loose file, or the .bsa archive
     bsa_inner_path: str = ""          # set when source_kind == "bsa"
     record: ScanRecord | None = None
+
+
+def ensure_mesh_output_dir(output_dir: Path) -> Path:
+    """Append Meshes unless the selected output is already that directory."""
+    return (
+        output_dir
+        if output_dir.name.casefold() == "meshes"
+        else output_dir / "Meshes"
+    )
+
+
+def default_mesh_output_dir(target_folder: Path) -> Path:
+    """Return the MO2-ready mesh root used by GUI and CLI defaults."""
+    return ensure_mesh_output_dir(target_folder / "DeadMesh-Fixed")
+
+
+def mesh_output_path(output_dir: Path, relative_path: str) -> Path:
+    """Join a work-item path beneath a mesh root without duplicating `meshes`."""
+    parts = Path(relative_path.replace("\\", "/")).parts
+    if parts and parts[0].casefold() == "meshes":
+        parts = parts[1:]
+    return output_dir.joinpath(*parts)
+
+
+def report_output_dir(output_dir: Path) -> Path:
+    """Keep reports beside an MO2-ready `Meshes` folder, not inside it."""
+    return output_dir.parent if output_dir.name.casefold() == "meshes" else output_dir
 
 
 def _fix_functions():
@@ -158,14 +187,20 @@ def _fix_functions():
     return functions
 
 
-def _relative_mesh_path(file_path: str) -> str:
-    """Extract the meshes\\... suffix from a dmscan-reported absolute path."""
+def _relative_mesh_path(file_path: str, scan_root: Path | None = None) -> str:
+    """Keep paths below the meshes directory or the selected scan folder."""
     normalized = file_path.replace("/", "\\").lower()
     marker = "\\meshes\\"
     index = normalized.rfind(marker)
     if index < 0:
         if normalized.startswith("meshes\\"):
             return normalized
+        if scan_root is not None:
+            try:
+                relative = Path(file_path).resolve().relative_to(scan_root.resolve())
+                return str(relative).replace("/", "\\").lower()
+            except ValueError:
+                pass
         return Path(normalized).name
     return normalized[index + 1 :]
 
@@ -222,7 +257,7 @@ def _collect_work_items(
     # beats lower.
     items: dict[str, WorkItem] = {}
     for record in loose_records:
-        rel = _relative_mesh_path(record.file)
+        rel = _relative_mesh_path(record.file, target_folder)
         items[rel] = WorkItem(
             relative_path=rel,
             source_kind="loose",
@@ -260,7 +295,7 @@ def _collect_work_items(
                 continue
             progress("scan", bsa_index, len(bsa_files), f"{bsa_path.name} (extracted)")
             for record in scanner.scan_dir(extract_dir):
-                rel = _relative_mesh_path(record.file)
+                rel = _relative_mesh_path(record.file, extract_dir)
                 existing = items.get(rel)
                 if existing and existing.source_kind == "loose":
                     continue  # loose wins at runtime; the BSA copy is never loaded
@@ -372,7 +407,7 @@ def run_pipeline(
         shutil.rmtree(work_root, ignore_errors=True)
 
     report.finish()
-    report.save(options.output_dir)
+    report.save(report_output_dir(options.output_dir))
     return report
 
 
@@ -493,7 +528,7 @@ def _process_item(
             base.detail = detail
             return base
 
-        destination = options.output_dir / Path(item.relative_path)
+        destination = mesh_output_path(options.output_dir, item.relative_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(current, destination)
         base.outcome = Outcome.FIXED

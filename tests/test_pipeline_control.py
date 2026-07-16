@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +13,128 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 class PipelineControlTests(unittest.TestCase):
+    def test_loose_items_preserve_paths_below_selected_folder(self) -> None:
+        from dmfix.core.pipeline import PipelineOptions, collect_work_items
+        from dmfix.core.scanner import FixCategory, ScanRecord
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "dmscan.exe").touch()
+            nested = root / "Lux (patch hub)" / "SmallHouse.nif"
+            nested.parent.mkdir()
+            nested.write_bytes(b"nif")
+            record = ScanRecord(
+                file=str(nested),
+                verdict="CRASH RISK",
+                status="PROBLEM",
+                raw={},
+                categories=[FixCategory.CRASH],
+            )
+            options = PipelineOptions(
+                deadmesh_dir=root,
+                output_dir=root / "DeadMesh-Fixed" / "Meshes",
+                include_bsa=False,
+            )
+            with patch(
+                "dmfix.core.pipeline.DmScan.scan_dir", return_value=[record]
+            ):
+                items, scan_temp = collect_work_items(
+                    root, options, lambda *_args: None
+                )
+            try:
+                self.assertEqual(
+                    items[0].relative_path,
+                    r"lux (patch hub)\smallhouse.nif",
+                )
+            finally:
+                scan_temp.rmdir()
+
+    def test_mesh_output_path_has_exactly_one_meshes_root(self) -> None:
+        from dmfix.core.pipeline import ensure_mesh_output_dir, mesh_output_path
+
+        output_root = Path(r"C:\Mods\Example\DeadMesh-Fixed\Meshes")
+        self.assertEqual(ensure_mesh_output_dir(output_root), output_root)
+        self.assertEqual(
+            ensure_mesh_output_dir(Path(r"D:\My Output")),
+            Path(r"D:\My Output\Meshes"),
+        )
+        self.assertEqual(
+            mesh_output_path(output_root, r"meshes\architecture\house.nif"),
+            output_root / "architecture" / "house.nif",
+        )
+        self.assertEqual(
+            mesh_output_path(output_root, r"Lux (patch hub)\interior.nif"),
+            output_root / "Lux (patch hub)" / "interior.nif",
+        )
+
+    def test_pipeline_writes_below_mesh_root_without_duplicate_folder(self) -> None:
+        from dmfix.core.pipeline import PipelineOptions, WorkItem, run_pipeline
+        from dmfix.core.scanner import FixCategory, ScanRecord
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "house.nif"
+            source.write_bytes(b"nif")
+            scan_temp = root / "scan-temp"
+            scan_temp.mkdir()
+            output_root = root / "DeadMesh-Fixed" / "Meshes"
+            record = ScanRecord(
+                file=str(source),
+                verdict="CRASH RISK",
+                status="PROBLEM",
+                raw={},
+                categories=[FixCategory.CRASH],
+            )
+            item = WorkItem(
+                r"meshes\architecture\house.nif",
+                "loose",
+                source,
+                record=record,
+            )
+
+            def fix(input_path, output_path, **_kwargs):
+                output_path.write_bytes(input_path.read_bytes())
+                return SimpleNamespace(success=True)
+
+            clean = ScanRecord(
+                file="candidate.nif",
+                verdict="OK",
+                status="CLEAN",
+                raw={},
+                categories=[],
+            )
+            with (
+                patch(
+                    "dmfix.core.pipeline.collect_work_items",
+                    return_value=([item], scan_temp),
+                ),
+                patch(
+                    "dmfix.core.pipeline._fix_functions",
+                    return_value={FixCategory.CRASH: fix},
+                ),
+                patch("dmfix.core.pipeline.DmScan") as scanner_type,
+            ):
+                scanner_type.return_value.scan_file.return_value = clean
+                scanner_type.return_value.vs_check.return_value = True
+                report = run_pipeline(
+                    root,
+                    PipelineOptions(
+                        deadmesh_dir=root,
+                        output_dir=output_root,
+                        categories={FixCategory.CRASH},
+                        include_bsa=False,
+                    ),
+                )
+
+            expected = output_root / "architecture" / "house.nif"
+            self.assertTrue(expected.is_file())
+            self.assertFalse((output_root / "meshes").exists())
+            self.assertEqual(report.results[0].output_path, str(expected))
+            self.assertTrue(
+                (output_root.parent / "deadmesh-fix-report.json").is_file()
+            )
+            self.assertFalse((output_root / "deadmesh-fix-report.json").exists())
+
     def test_stop_request_finishes_current_item_and_marks_remaining_not_run(self) -> None:
         from dmfix.core.pipeline import (
             PipelineEventKind,

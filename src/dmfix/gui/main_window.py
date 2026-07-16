@@ -39,6 +39,9 @@ from dmfix.core.pipeline import (
     RunControl,
     WorkItem,
     collect_work_items,
+    default_mesh_output_dir,
+    ensure_mesh_output_dir,
+    report_output_dir,
     run_pipeline,
 )
 from dmfix.core.paths import icon_path
@@ -72,7 +75,7 @@ def derive_output_folder(target_folder: str) -> str:
     """Return the default loose-file output folder for a target mod."""
     if not target_folder.strip():
         return ""
-    return str(Path(target_folder) / "DeadMesh-Fixed")
+    return str(default_mesh_output_dir(Path(target_folder)))
 
 
 def output_folder_after_target_change(
@@ -462,7 +465,7 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self._output_manually_edited = True
-            self.output_edit.setText(folder)
+            self.output_edit.setText(str(ensure_mesh_output_dir(Path(folder))))
 
     def _target_changed(self, target: str) -> None:
         self.settings.last_target_folder = target.strip()
@@ -516,7 +519,9 @@ class MainWindow(QMainWindow):
     def _make_options(self) -> PipelineOptions:
         return PipelineOptions(
             deadmesh_dir=Path(self.settings.deadmesh_dir),
-            output_dir=Path(self.output_edit.text().strip()),
+            output_dir=ensure_mesh_output_dir(
+                Path(self.output_edit.text().strip())
+            ),
             categories=self._selected_categories(),
             strength=str(self.strength_combo.currentData()),
             include_bsa=self.include_bsa_check.isChecked(),
@@ -530,7 +535,13 @@ class MainWindow(QMainWindow):
         return None
 
     def _valid_output(self, target: Path) -> bool:
-        if is_safe_output_folder(str(target), self.output_edit.text()):
+        output_text = self.output_edit.text().strip()
+        if not output_text:
+            QMessageBox.warning(self, tr("app_title"), tr("output_required"))
+            return False
+        output = ensure_mesh_output_dir(Path(output_text))
+        self.output_edit.setText(str(output))
+        if is_safe_output_folder(str(target), str(output)):
             return True
         QMessageBox.warning(self, tr("app_title"), tr("output_required"))
         return False
@@ -907,7 +918,10 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _open_report(self) -> None:
-        report_path = Path(self.output_edit.text().strip()) / "deadmesh-fix-report.txt"
+        report_path = (
+            report_output_dir(Path(self.output_edit.text().strip()))
+            / "deadmesh-fix-report.txt"
+        )
         if report_path.is_file():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(report_path)))
             return

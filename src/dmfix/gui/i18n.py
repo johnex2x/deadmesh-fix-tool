@@ -32,7 +32,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "zh-TW": "選擇 DeadMesh 資料夾",
     },
     "target_folder": {"en": "Target mod folder", "zh-TW": "目標模組資料夾"},
-    "output_folder": {"en": "Output folder", "zh-TW": "輸出資料夾"},
+    "output_folder": {
+        "en": "Mesh output folder",
+        "zh-TW": "網格輸出資料夾（Meshes）",
+    },
     "select_target_folder": {
         "en": "Select target mod folder",
         "zh-TW": "選擇目標模組資料夾",

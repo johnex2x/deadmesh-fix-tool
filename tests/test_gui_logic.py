@@ -76,7 +76,7 @@ class OutputFolderTests(unittest.TestCase):
         self.assertEqual(derive_output_folder(""), "")
         self.assertEqual(
             derive_output_folder(r"C:\Mods\Example"),
-            r"C:\Mods\Example\DeadMesh-Fixed",
+            r"C:\Mods\Example\DeadMesh-Fixed\Meshes",
         )
 
     def test_manual_output_is_preserved_when_target_changes(self) -> None:
@@ -92,7 +92,7 @@ class OutputFolderTests(unittest.TestCase):
             output_folder_after_target_change(
                 r"C:\Mods\New", r"D:\My Output", manually_edited=False
             ),
-            r"C:\Mods\New\DeadMesh-Fixed",
+            r"C:\Mods\New\DeadMesh-Fixed\Meshes",
         )
 
     def test_output_folder_cannot_be_empty_or_replace_the_target(self) -> None:
@@ -115,6 +115,60 @@ class OutputFolderTests(unittest.TestCase):
         self.assertFalse(is_valid_target_folder(r"Z:\Does\Not\Exist"))
         with tempfile.TemporaryDirectory() as temp_dir:
             self.assertTrue(is_valid_target_folder(temp_dir))
+
+
+class CliOutputFolderTests(unittest.TestCase):
+    def test_cli_default_is_the_same_mesh_root_as_the_gui(self) -> None:
+        from dmfix.cli import main
+        from dmfix.core.report import RunReport
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "mod"
+            deadmesh = root / "DeadMesh"
+            target.mkdir()
+            deadmesh.mkdir()
+            (deadmesh / "dmscan.exe").touch()
+            report = RunReport(
+                scanned_folder=str(target),
+                output_folder=str(target / "DeadMesh-Fixed" / "Meshes"),
+            )
+            with (
+                patch("dmfix.cli.run_pipeline", return_value=report) as run,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(
+                    main([str(target), "--deadmesh", str(deadmesh)]),
+                    0,
+                )
+
+            options = run.call_args.args[1]
+            self.assertEqual(
+                options.output_dir,
+                target / "DeadMesh-Fixed" / "Meshes",
+            )
+
+            custom = root / "custom output"
+            with (
+                patch("dmfix.cli.run_pipeline", return_value=report) as custom_run,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            str(target),
+                            "--deadmesh",
+                            str(deadmesh),
+                            "--out",
+                            str(custom),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(
+                custom_run.call_args.args[1].output_dir,
+                custom / "Meshes",
+            )
 
 
 if __name__ == "__main__":
