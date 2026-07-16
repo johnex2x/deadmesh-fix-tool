@@ -13,6 +13,54 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 class PipelineControlTests(unittest.TestCase):
+    def test_pipeline_uses_prescanned_work_items_without_scanning(self) -> None:
+        from dmfix.core.pipeline import (
+            PipelineOptions,
+            RunControl,
+            WorkItem,
+            run_pipeline,
+        )
+        from dmfix.core.scanner import FixCategory, ScanRecord
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "dmscan.exe").touch()
+            source = root / "heavy.nif"
+            source.write_bytes(b"nif")
+            item = WorkItem(
+                r"meshes\heavy.nif",
+                "loose",
+                source,
+                record=ScanRecord(
+                    file=str(source),
+                    verdict="VERY HEAVY COLLISION",
+                    status="PROBLEM",
+                    raw={},
+                    categories=[FixCategory.HEAVY],
+                ),
+            )
+            control = RunControl()
+            control.request_stop()
+
+            with patch(
+                "dmfix.core.pipeline.collect_work_items",
+                side_effect=AssertionError("Fix rescanned the target"),
+            ):
+                report = run_pipeline(
+                    root,
+                    PipelineOptions(
+                        deadmesh_dir=root,
+                        output_dir=root / "output" / "Meshes",
+                        categories={FixCategory.HEAVY},
+                        include_bsa=False,
+                    ),
+                    control=control,
+                    work_items=[item],
+                )
+
+            self.assertEqual(report.status, "stopped")
+            self.assertEqual(report.total_items, 1)
+
     def test_heavy_simplification_checks_stop_before_opening_the_mesh(self) -> None:
         from dmfix.core.fixes.simplify import simplify_collision
 

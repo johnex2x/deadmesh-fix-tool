@@ -131,10 +131,16 @@ class FixWorker(QObject):
     finished = Signal(object)
     error = Signal(str, str)
 
-    def __init__(self, target_folder: Path, options: PipelineOptions) -> None:
+    def __init__(
+        self,
+        target_folder: Path,
+        options: PipelineOptions,
+        work_items: list[WorkItem] | None = None,
+    ) -> None:
         super().__init__()
         self.target_folder = target_folder
         self.options = options
+        self.work_items = None if work_items is None else list(work_items)
         self.control = RunControl()
 
     @Slot()
@@ -146,6 +152,7 @@ class FixWorker(QObject):
                 self.progress.emit,
                 control=self.control,
                 on_event=self.event.emit,
+                work_items=self.work_items,
             )
         except Exception as error:
             self.error.emit(type(error).__name__, str(error))
@@ -569,7 +576,7 @@ class MainWindow(QMainWindow):
         self._cleanup_scan_temp()
         options = self._make_options()
         options.only_paths = checked
-        worker = FixWorker(target, options)
+        worker = FixWorker(target, options, self._pending_items)
         self._live_counts = {outcome.value: 0 for outcome in Outcome}
         self._start_worker(worker, self._fix_finished, "fix")
 

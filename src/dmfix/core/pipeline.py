@@ -332,6 +332,7 @@ def run_pipeline(
     *,
     control: RunControl | None = None,
     on_event: EventCallback | None = None,
+    work_items: list[WorkItem] | None = None,
 ) -> RunReport:
     progress = progress or (lambda *_: None)
     control = control or RunControl()
@@ -346,7 +347,11 @@ def run_pipeline(
     )
     report.start()
 
-    worklist, temp_root = collect_work_items(target_folder, options, progress)
+    temp_root: Path | None = None
+    if work_items is None:
+        worklist, temp_root = collect_work_items(target_folder, options, progress)
+    else:
+        worklist = list(work_items)
     if options.only_paths is not None:
         selected = {p.replace("/", "\\").lower() for p in options.only_paths}
         worklist = [item for item in worklist if item.relative_path in selected]
@@ -461,7 +466,8 @@ def run_pipeline(
                 )
             )
     finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
+        if temp_root is not None:
+            shutil.rmtree(temp_root, ignore_errors=True)
         shutil.rmtree(work_root, ignore_errors=True)
 
     report.finish()
