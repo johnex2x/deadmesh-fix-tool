@@ -249,11 +249,11 @@ class PipelineControlTests(unittest.TestCase):
         )
         self.assertEqual(
             mesh_output_path(output_root, r"meshes\architecture\house.nif"),
-            output_root / "architecture" / "house.nif",
+            output_root / "house.nif",
         )
         self.assertEqual(
             mesh_output_path(output_root, r"Lux (patch hub)\interior.nif"),
-            output_root / "Lux (patch hub)" / "interior.nif",
+            output_root / "interior.nif",
         )
 
     def test_pipeline_writes_below_mesh_root_without_duplicate_folder(self) -> None:
@@ -315,14 +315,66 @@ class PipelineControlTests(unittest.TestCase):
                     ),
                 )
 
-            expected = output_root / "architecture" / "house.nif"
+            expected = output_root / "house.nif"
             self.assertTrue(expected.is_file())
-            self.assertFalse((output_root / "meshes").exists())
+            self.assertFalse((output_root / "architecture").exists())
             self.assertEqual(report.results[0].output_path, str(expected))
             self.assertTrue(
                 (output_root.parent / "deadmesh-fix-report.json").is_file()
             )
             self.assertFalse((output_root / "deadmesh-fix-report.json").exists())
+
+    def test_manifest_cleanup_preserves_unlisted_custom_files(self) -> None:
+        from dmfix.core.pipeline import _prepare_output_dir, _record_output
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "DeadMesh-Fixed" / "Meshes"
+            output.mkdir(parents=True)
+            old = output / "legacy" / "old.nif"
+            old.parent.mkdir()
+            custom = output / "custom.nif"
+            old.write_bytes(b"old")
+            custom.write_bytes(b"custom")
+            names = _prepare_output_dir(output)
+            new = output / "old.nif"
+            _record_output(output, names, new)
+            new.write_bytes(b"new")
+            names = _prepare_output_dir(output)
+            self.assertFalse(new.exists())
+            self.assertFalse(old.exists())
+            self.assertTrue(custom.exists())
+
+    def test_flat_output_basename_collision_fails_closed(self) -> None:
+        from dmfix.core.pipeline import PipelineOptions, WorkItem, run_pipeline
+        from dmfix.core.report import Outcome
+        from dmfix.core.scanner import FixCategory, ScanRecord
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "dmscan.exe").touch()
+            source = root / "source.nif"
+            source.write_bytes(b"nif")
+            record = ScanRecord(
+                file=str(source), verdict="CRASH RISK", status="PROBLEM",
+                raw={}, categories=[FixCategory.CRASH],
+            )
+            items = [
+                WorkItem(r"a\same.nif", "loose", source, record=record),
+                WorkItem(r"b\same.nif", "loose", source, record=record),
+            ]
+            scan_temp = root / "scan-temp"
+            scan_temp.mkdir()
+            with patch("dmfix.core.pipeline.collect_work_items", return_value=(items, scan_temp)):
+                report = run_pipeline(
+                    root,
+                    PipelineOptions(
+                        deadmesh_dir=root, output_dir=root / "DeadMesh-Fixed" / "Meshes",
+                        categories={FixCategory.CRASH}, include_bsa=False,
+                    ),
+                    work_items=items,
+                )
+            self.assertEqual([r.outcome for r in report.results], [Outcome.FAILED, Outcome.FAILED])
+            self.assertIn("basename collision", report.results[0].reason)
 
     def test_stop_request_finishes_current_item_and_marks_remaining_not_run(self) -> None:
         from dmfix.core.pipeline import (

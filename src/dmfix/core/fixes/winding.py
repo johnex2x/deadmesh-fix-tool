@@ -4,11 +4,13 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from dmfix.core.fixes._mesh_rewrite import write_collision_mesh
 from dmfix.core.fixes.acceptance import nothing_got_worse
 from dmfix.core.fixes.degenerate import _scanner
 from dmfix.core.fixes.mopp_rebuild import decode_compressed_mesh
-from dmfix.core.fixes.simplify import _connected_face_components
+from dmfix.core.fixes.simplify import _connected_face_components, _world_to_havok
 from dmfix.core.nif_io import NifFileLayout, locate_collisions
 from dmfix.core.scanner import DmScanError
 
@@ -38,12 +40,15 @@ def fix_inverted(
         layout = NifFileLayout.read(input_path)
         collisions = locate_collisions(input_path)
         if len(collisions) != 1:
-            raise ValueError(f"expected exactly one MOPP collision, found {len(collisions)}")
+            raise ValueError(
+                "UNSUPPORTED_MULTI_MOPP: orientation repair requires one "
+                f"independent collision group; found {len(collisions)}"
+            )
         collision = collisions[0]
         if collision.shape_chain[1] != "bhkCompressedMeshShape":
             raise ValueError(f"unsupported MOPP child shape {collision.shape_chain[1]}")
         mesh = decode_compressed_mesh(layout, collision.child_shape_block_index)
-        to_flip = _faces_to_flip(mesh.vertices, mesh.triangles, baseline)
+        to_flip = _faces_to_flip(mesh.vertices, mesh.triangles, baseline, collision)
         if not to_flip:
             raise ValueError("dmscan did not identify an unambiguous inverted component")
         triangles = [
@@ -97,6 +102,7 @@ def _faces_to_flip(
     vertices: tuple[tuple[float, float, float], ...],
     triangles: tuple[tuple[int, int, int], ...],
     scan: dict,
+    collision=None,
 ) -> set[int]:
     winding = scan["winding_cull"]
     if winding["tris"] and winding["inverted"] >= math.ceil(winding["tris"] * 0.9):
@@ -111,9 +117,15 @@ def _faces_to_flip(
     matched: set[int] = set()
     used_components: set[int] = set()
     for descriptor in descriptors:
-        point = descriptor.get("at") if isinstance(descriptor, dict) else None
+        point = (
+            descriptor.get("center", descriptor.get("at"))
+            if isinstance(descriptor, dict)
+            else None
+        )
         if not isinstance(point, list) or len(point) != 3:
             return set()
+        if collision is not None:
+            point = _world_to_havok(np.asarray(point, dtype=float), collision).tolist()
         candidates: list[tuple[float, int]] = []
         for component_index, component in enumerate(components):
             if component_index in used_components:

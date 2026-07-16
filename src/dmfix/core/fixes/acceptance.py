@@ -99,23 +99,49 @@ def nothing_got_worse(
 
 
 def simplify_scan_is_acceptable(baseline: dict, scan: dict) -> bool:
-    verdict = scan["verdict"].upper()
-    if (
-        scan["status"] == "BROKEN"
-        or any(word in verdict for word in ("HEAVY", "CRASH", "HANG"))
-        or _metric(scan, "broken", "refs") != 0
-        or _metric(scan, "freeze", "cullVerdict") >= 1
-    ):
-        return False
-    if _metric(scan, "orientation", "inverted") > _metric(baseline, "orientation", "inverted"):
-        return False
-    if _metric(scan, "winding_cull", "inverted") > _metric(baseline, "winding_cull", "inverted"):
-        return False
-    if _metric(scan, "degenerate", "tris", "count") > _metric(
-        baseline, "degenerate", "tris", "count"
-    ):
-        return False
-    if baseline["ray_status"] == "ok" and scan["ray_status"] == "ok":
-        if not _ray_scan_not_worse(baseline, scan):
-            return False
-    return True
+    return not simplify_certification_failures(baseline, scan)
+
+
+def simplify_certification_failures(baseline: dict, scan: dict) -> list[str]:
+    """Return the exact safety-gate checks that rejected a candidate.
+
+    This deliberately mirrors :func:`simplify_scan_is_acceptable` so the GUI
+    can explain a failed rescue without changing the conservative gate.
+    """
+    failures: list[str] = []
+    verdict = str(scan.get("verdict", "")).upper()
+    status = str(scan.get("status", ""))
+    if status == "BROKEN":
+        failures.append("status=BROKEN")
+    for word in ("HEAVY", "CRASH", "HANG"):
+        if word in verdict:
+            failures.append(f"verdict contains {word}")
+            break
+    broken_refs = _metric(scan, "broken", "refs")
+    if broken_refs != 0:
+        failures.append(f"broken.refs={broken_refs}")
+    cull = _metric(scan, "freeze", "cullVerdict")
+    if cull >= 1:
+        failures.append(f"freeze.cullVerdict={cull}")
+    orientation = _metric(scan, "orientation", "inverted")
+    baseline_orientation = _metric(baseline, "orientation", "inverted")
+    if orientation > baseline_orientation:
+        failures.append(f"orientation.inverted={orientation}>{baseline_orientation}")
+    winding = _metric(scan, "winding_cull", "inverted")
+    baseline_winding = _metric(baseline, "winding_cull", "inverted")
+    if winding > baseline_winding:
+        failures.append(f"winding_cull.inverted={winding}>{baseline_winding}")
+    degenerate = _metric(scan, "degenerate", "tris", "count")
+    baseline_degenerate = _metric(baseline, "degenerate", "tris", "count")
+    if degenerate > baseline_degenerate:
+        failures.append(f"degenerate.tris.count={degenerate}>{baseline_degenerate}")
+    if baseline.get("ray_status") == "ok" and scan.get("ray_status") == "ok":
+        baseline_risk = str(_section(baseline, "fall_through_risk").get("level", "unknown"))
+        risk = str(_section(scan, "fall_through_risk").get("level", "unknown"))
+        if not _fall_through_risk_not_worse(baseline, scan):
+            failures.append(f"fall_through_risk.level={risk}>{baseline_risk}")
+        invisible = _metric(scan, "invisible_walls", "count")
+        baseline_invisible = _metric(baseline, "invisible_walls", "count")
+        if invisible > baseline_invisible:
+            failures.append(f"invisible_walls.count={invisible}>{baseline_invisible}")
+    return failures

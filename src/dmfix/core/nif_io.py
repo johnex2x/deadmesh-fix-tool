@@ -59,11 +59,11 @@ class NifFileLayout:
         stream_version = _unpack("I", data, pos)
         pos += 4
 
-        if (version, endian, user_version, stream_version) != (
-            SE_VERSION,
-            1,
-            SE_USER_VERSION,
-            SE_STREAM_VERSION,
+        if (
+            version != SE_VERSION
+            or endian != 1
+            or user_version != SE_USER_VERSION
+            or stream_version not in {83, SE_STREAM_VERSION}
         ):
             raise ValueError("only little-endian Skyrim SE NIF 20.2.0.7 is supported")
 
@@ -216,6 +216,14 @@ class CollisionInfo:
     mopp_code: bytes
     mopp_origin: tuple[float, float, float]
     mopp_scale: float
+    target_linear: tuple[float, ...] = (
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    )
+    target_translation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    body_translation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    body_rotation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
 
 
 def read_mopp(layout: NifFileLayout, block_index: int) -> MoppData:
@@ -277,9 +285,27 @@ def locate_collisions(path: str | Path) -> list[CollisionInfo]:
                 mopp_code=code,
                 mopp_origin=origin,
                 mopp_scale=scale,
+                target_linear=_target_linear(target),
+                target_translation=_target_translation(target),
+                body_translation=tuple(float(value) for value in tuple(body.properties.translation)[:3]),
+                body_rotation=tuple(float(value) for value in tuple(body.properties.rotation)[:4]),
             )
         )
     return collisions
+
+
+def _target_linear(target) -> tuple[float, ...]:
+    transform = target.global_transform
+    scale = float(transform.scale)
+    return tuple(
+        float(transform.rotation[row][column]) * scale
+        for row in range(3)
+        for column in range(3)
+    )
+
+
+def _target_translation(target) -> tuple[float, float, float]:
+    return tuple(float(value) for value in tuple(target.global_transform.translation)[:3])
 
 
 def _unpack(format_code: str, data: bytes, offset: int) -> int:

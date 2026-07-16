@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import threading
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -115,6 +116,8 @@ class PipelineOptions:
     # When set, only work items whose relative_path is in this set are
     # processed (GUI re-run of selected rows). None = everything found.
     only_paths: set[str] | None = None
+    # Fresh runs clean only products recorded by the tool; retries preserve them.
+    clean_previous_outputs: bool = True
 
 
 @dataclass
@@ -143,16 +146,74 @@ def default_mesh_output_dir(target_folder: Path) -> Path:
 
 
 def mesh_output_path(output_dir: Path, relative_path: str) -> Path:
-    """Join a work-item path beneath a mesh root without duplicating `meshes`."""
-    parts = Path(relative_path.replace("\\", "/")).parts
-    if parts and parts[0].casefold() == "meshes":
-        parts = parts[1:]
-    return output_dir.joinpath(*parts)
+    """Place every repaired NIF directly below the MO2-ready mesh root."""
+    name = Path(relative_path.replace("\\", "/")).name
+    if not name:
+        raise ValueError(f"invalid empty mesh path: {relative_path!r}")
+    return output_dir / name
 
 
 def report_output_dir(output_dir: Path) -> Path:
     """Keep reports beside an MO2-ready `Meshes` folder, not inside it."""
     return output_dir.parent if output_dir.name.casefold() == "meshes" else output_dir
+
+
+OUTPUT_MANIFEST_NAME = "deadmesh-fix-output-manifest.json"
+
+
+def _output_manifest_path(output_dir: Path) -> Path:
+    return report_output_dir(output_dir) / OUTPUT_MANIFEST_NAME
+
+
+def _write_output_manifest(output_dir: Path, names: set[str]) -> None:
+    path = _output_manifest_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "files": sorted(names, key=str.casefold)}
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def _prepare_output_dir(output_dir: Path, *, clean: bool = True) -> set[str]:
+    """Remove only prior tool products, with a one-time default-root migration."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = _output_manifest_path(output_dir)
+    names: set[str] = set()
+    if manifest.is_file():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            names = {
+                str(name) for name in data.get("files", [])
+                if Path(str(name)).name == str(name)
+            }
+        except (OSError, ValueError, TypeError):
+            names = set()
+        if clean:
+            for name in names:
+                (output_dir / name).unlink(missing_ok=True)
+    elif clean and output_dir.parent.name.casefold() == "deadmesh-fixed":
+        # Migrate the old nested layout once: remove NIF products only.
+        for nif in output_dir.rglob("*.nif"):
+            if nif.parent != output_dir:
+                nif.unlink(missing_ok=True)
+        for folder in sorted(
+            (p for p in output_dir.rglob("*") if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+    if clean:
+        _write_output_manifest(output_dir, set())
+        return set()
+    return names
+
+
+def _record_output(output_dir: Path, names: set[str], destination: Path) -> None:
+    names.add(destination.name)
+    _write_output_manifest(output_dir, names)
 
 
 def _fix_functions():
@@ -347,6 +408,11 @@ def run_pipeline(
     )
     report.start()
 
+    output_names: set[str] = set()
+    output_names = _prepare_output_dir(
+        options.output_dir, clean=options.clean_previous_outputs
+    )
+
     temp_root: Path | None = None
     if work_items is None:
         worklist, temp_root = collect_work_items(target_folder, options, progress)
@@ -356,6 +422,32 @@ def run_pipeline(
         selected = {p.replace("/", "\\").lower() for p in options.only_paths}
         worklist = [item for item in worklist if item.relative_path in selected]
     report.total_items = len(worklist)
+    # Flattening is intentionally fail-closed: two source paths with the same
+    # basename cannot safely occupy one MO2 Meshes root.
+    by_name: dict[str, list[WorkItem]] = {}
+    for item in worklist:
+        by_name.setdefault(Path(item.relative_path).name.casefold(), []).append(item)
+    conflicts = {
+        key: items for key, items in by_name.items() if len(items) > 1
+    }
+    if conflicts:
+        remaining: list[WorkItem] = []
+        for item in worklist:
+            key = Path(item.relative_path).name.casefold()
+            if key not in conflicts:
+                remaining.append(item)
+                continue
+            result = _output_collision_result(item, conflicts[key])
+            report.results.append(result)
+            report.processed_items += 1
+            on_event(PipelineEvent(
+                PipelineEventKind.ITEM_COMPLETED,
+                report.processed_items,
+                report.total_items,
+                item.relative_path,
+                result,
+            ))
+        worklist = remaining
     work_root = Path(tempfile.mkdtemp(prefix="dmfix-work-"))
     try:
         for index, item in enumerate(worklist):
@@ -390,12 +482,12 @@ def run_pipeline(
                 )
             record = item.record
             assert record is not None
-            progress("fix", index, len(worklist), item.relative_path)
+            progress("fix", report.processed_items, report.total_items, item.relative_path)
             on_event(
                 PipelineEvent(
                     PipelineEventKind.ITEM_STARTED,
-                    index,
-                    len(worklist),
+                    report.processed_items,
+                    report.total_items,
                     item.relative_path,
                 )
             )
@@ -420,6 +512,7 @@ def run_pipeline(
                     work_root,
                     control.raise_if_stopped,
                     item_progress,
+                    output_names,
                 )
             except StopRequested:
                 result = _not_run_result(
@@ -452,7 +545,7 @@ def run_pipeline(
                 PipelineEvent(
                     PipelineEventKind.ITEM_COMPLETED,
                     report.processed_items,
-                    len(worklist),
+                report.total_items,
                     item.relative_path,
                     result,
                 )
@@ -494,6 +587,24 @@ def _not_run_result(
     )
 
 
+def _output_collision_result(item: WorkItem, peers: list[WorkItem]) -> FileResult:
+    record = item.record
+    assert record is not None
+    paths = ", ".join(sorted(peer.relative_path for peer in peers))
+    return FileResult(
+        source=(
+            f"{item.source_path}::{item.bsa_inner_path}"
+            if item.source_kind == "bsa"
+            else str(item.source_path)
+        ),
+        relative_path=item.relative_path,
+        categories=[category.value for category in record.categories],
+        outcome=Outcome.FAILED,
+        reason=f"output basename collision; flat Meshes output cannot choose between: {paths}",
+        verdict_before=record.verdict,
+    )
+
+
 def _process_item(
     item: WorkItem,
     record: ScanRecord,
@@ -503,6 +614,7 @@ def _process_item(
     work_root: Path,
     stop_check: Callable[[], None],
     item_progress: Callable[[str], None],
+    output_names: set[str],
 ) -> FileResult:
     categories = [c for c in CATEGORY_ORDER if c in record.categories]
     base = FileResult(
@@ -566,9 +678,14 @@ def _process_item(
             stop_check()
             if not getattr(result, "success", True):
                 base.outcome = Outcome.FAILED
-                base.reason = (
+                failures = tuple(getattr(result, "certification_failures", ()))
+                failure_detail = ", ".join(failures) or getattr(
+                    result, "verdict", "see detail"
+                )
+                reason = getattr(result, "reason", "")
+                base.reason = reason or (
                     f"{category.value}: fix could not be certified "
-                    f"({getattr(result, 'verdict', 'see detail')})"
+                    f"({failure_detail})"
                 )
                 base.detail = {**detail, category.value: _result_detail(result)}
                 return base
@@ -607,6 +724,7 @@ def _process_item(
         destination = mesh_output_path(options.output_dir, item.relative_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(current, destination)
+        _record_output(options.output_dir, output_names, destination)
         base.outcome = Outcome.FIXED
         base.output_path = str(destination)
         base.detail = detail
@@ -614,7 +732,12 @@ def _process_item(
     except StopRequested:
         raise
     except Exception as error:  # fail closed per file, keep the run going
-        base.outcome = Outcome.ERROR
+        message = str(error)
+        base.outcome = (
+            Outcome.FAILED
+            if message.startswith("UNSUPPORTED_MULTI_MOPP")
+            else Outcome.ERROR
+        )
         base.reason = f"{type(error).__name__}: {error}"
         return base
     finally:
@@ -633,6 +756,8 @@ def _result_detail(result) -> dict:
         "triangle_count",
         "old_block_size",
         "new_block_size",
+        "certification_failures",
+        "reason",
     ):
         value = getattr(result, name, None)
         if value is not None:

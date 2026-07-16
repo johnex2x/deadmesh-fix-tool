@@ -15,7 +15,7 @@ class VersionTests(unittest.TestCase):
         from dmfix import __version__
         from dmfix.core.report import RunReport
 
-        self.assertEqual(__version__, "1.0.2")
+        self.assertEqual(__version__, "1.1.0")
         report = RunReport(scanned_folder="input", output_folder="output")
         self.assertEqual(json.loads(report.to_json())["tool_version"], __version__)
         self.assertIn(f"version  : {__version__}", report.to_text())
@@ -29,7 +29,7 @@ class VersionTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as exit_context, redirect_stdout(output):
             main(["--version"])
         self.assertEqual(exit_context.exception.code, 0)
-        self.assertEqual(output.getvalue().strip(), "dmfix 1.0.2")
+        self.assertEqual(output.getvalue().strip(), "dmfix 1.1.0")
 
 
 if __name__ == "__main__":

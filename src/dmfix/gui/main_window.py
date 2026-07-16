@@ -576,6 +576,9 @@ class MainWindow(QMainWindow):
         self._cleanup_scan_temp()
         options = self._make_options()
         options.only_paths = checked
+        # A first fix run owns cleanup; any subsequent selected retry must
+        # preserve files already certified in the Meshes root.
+        options.clean_previous_outputs = self._report is None
         worker = FixWorker(target, options, self._pending_items)
         self._live_counts = {outcome.value: 0 for outcome in Outcome}
         self._start_worker(worker, self._fix_finished, "fix")

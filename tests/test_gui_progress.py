@@ -23,7 +23,7 @@ class GuiProgressTests(unittest.TestCase):
 
         window = MainWindow(Settings(language="en"))
         try:
-            self.assertIn("1.0.2", window.windowTitle())
+            self.assertIn("1.1.0", window.windowTitle())
             self.assertEqual(window.pause_button.text(), "Pause")
             self.assertEqual(window.stop_button.text(), "Stop")
             self.assertFalse(window.pause_button.isEnabled())
