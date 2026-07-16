@@ -68,6 +68,19 @@ class GuiProgressTests(unittest.TestCase):
                 PipelineEvent(PipelineEventKind.ITEM_STARTED, 0, 1, relative_path)
             )
             self.assertEqual(window.results_table.item(0, 1).text(), "Processing")
+            window._pipeline_event(
+                PipelineEvent(
+                    PipelineEventKind.ITEM_PROGRESS,
+                    0,
+                    1,
+                    relative_path,
+                    message="simplification round 1/4: decimation",
+                )
+            )
+            self.assertIn(
+                "simplification round 1/4: decimation",
+                window.status_label.text(),
+            )
 
             window._pipeline_event(
                 PipelineEvent(
@@ -88,7 +101,11 @@ class GuiProgressTests(unittest.TestCase):
             window.close()
 
     def test_pause_resume_and_stop_requests_are_visible_and_cooperative(self) -> None:
-        from dmfix.core.pipeline import PipelineOptions
+        from dmfix.core.pipeline import (
+            PipelineEvent,
+            PipelineEventKind,
+            PipelineOptions,
+        )
         from dmfix.gui.main_window import FixWorker, MainWindow
         from dmfix.gui.settings import Settings
 
@@ -116,6 +133,17 @@ class GuiProgressTests(unittest.TestCase):
             self.assertIn("Stop requested", window.status_label.text())
             self.assertFalse(window.pause_button.isEnabled())
             self.assertFalse(window.stop_button.isEnabled())
+
+            window._pipeline_event(
+                PipelineEvent(
+                    PipelineEventKind.ITEM_PROGRESS,
+                    0,
+                    1,
+                    r"meshes\heavy.nif",
+                    message="simplification round 2/4: DeadMesh scan",
+                )
+            )
+            self.assertIn("Stop requested", window.status_label.text())
         finally:
             window._worker = None
             window.close()

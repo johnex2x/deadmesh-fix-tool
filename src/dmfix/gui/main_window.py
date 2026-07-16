@@ -644,6 +644,18 @@ class MainWindow(QMainWindow):
                 total=event.total,
                 message=event.relative_path,
             )
+        elif event.kind is PipelineEventKind.ITEM_PROGRESS:
+            if (
+                isinstance(self._worker, FixWorker)
+                and self._worker.control.is_stop_requested
+            ):
+                return
+            self._set_status(
+                "status_fixing_progress",
+                current=event.current + 1,
+                total=event.total,
+                message=event.message,
+            )
         elif event.kind is PipelineEventKind.ITEM_COMPLETED and event.result is not None:
             self.progress_bar.setValue(event.current)
             if row is not None:

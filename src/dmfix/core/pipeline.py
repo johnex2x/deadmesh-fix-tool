@@ -24,6 +24,7 @@ ProgressCallback = Callable[[str, int, int, str], None]
 
 class PipelineEventKind(Enum):
     ITEM_STARTED = "item_started"
+    ITEM_PROGRESS = "item_progress"
     ITEM_COMPLETED = "item_completed"
     RUN_PAUSED = "run_paused"
     RUN_RESUMED = "run_resumed"
@@ -38,13 +39,18 @@ class PipelineEvent:
     total: int
     relative_path: str = ""
     result: FileResult | None = None
+    message: str = ""
 
 
 EventCallback = Callable[[PipelineEvent], None]
 
 
+class StopRequested(RuntimeError):
+    """Raised at a safe internal checkpoint after the user requests Stop."""
+
+
 class RunControl:
-    """Thread-safe cooperative pause and stop control checked between files."""
+    """Thread-safe cooperative pause and safe-checkpoint stop control."""
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
@@ -81,6 +87,10 @@ class RunControl:
             while self._paused and not self._stop_requested:
                 self._condition.wait()
             return not self._stop_requested
+
+    def raise_if_stopped(self) -> None:
+        if self.is_stop_requested:
+            raise StopRequested
 
 # Order matters: structural crash repair first, then geometry cleanups, then
 # the (geometry-changing) simplification, orphan-block removal last.
@@ -161,6 +171,8 @@ def _fix_functions():
             src, dst,
             strength=kw.get("strength", "normal"),
             deadmesh_dir=kw.get("deadmesh_dir"),
+            stop_check=kw.get("stop_check"),
+            item_progress=kw.get("item_progress"),
         ),
     }
     try:
@@ -382,7 +394,53 @@ def run_pipeline(
                     item.relative_path,
                 )
             )
-            result = _process_item(item, record, options, fixes, scanner, work_root)
+            def item_progress(message: str) -> None:
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.ITEM_PROGRESS,
+                        report.processed_items,
+                        report.total_items,
+                        item.relative_path,
+                        message=message,
+                    )
+                )
+
+            try:
+                result = _process_item(
+                    item,
+                    record,
+                    options,
+                    fixes,
+                    scanner,
+                    work_root,
+                    control.raise_if_stopped,
+                    item_progress,
+                )
+            except StopRequested:
+                result = _not_run_result(
+                    item, "run stopped during this file at a safe checkpoint"
+                )
+                report.results.append(result)
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.ITEM_COMPLETED,
+                        report.processed_items,
+                        report.total_items,
+                        item.relative_path,
+                        result,
+                    )
+                )
+                for pending in worklist[index + 1 :]:
+                    report.results.append(_not_run_result(pending))
+                report.status = "stopped"
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_STOPPED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
+                break
             report.results.append(result)
             report.processed_items += 1
             on_event(
@@ -411,7 +469,9 @@ def run_pipeline(
     return report
 
 
-def _not_run_result(item: WorkItem) -> FileResult:
+def _not_run_result(
+    item: WorkItem, reason: str = "run stopped before this file started"
+) -> FileResult:
     record = item.record
     assert record is not None
     return FileResult(
@@ -423,7 +483,7 @@ def _not_run_result(item: WorkItem) -> FileResult:
         relative_path=item.relative_path,
         categories=[category.value for category in record.categories],
         outcome=Outcome.NOT_RUN,
-        reason="run stopped before this file started",
+        reason=reason,
         verdict_before=record.verdict,
     )
 
@@ -435,6 +495,8 @@ def _process_item(
     fixes: dict[FixCategory, Callable],
     scanner: DmScan,
     work_root: Path,
+    stop_check: Callable[[], None],
+    item_progress: Callable[[str], None],
 ) -> FileResult:
     categories = [c for c in CATEGORY_ORDER if c in record.categories]
     base = FileResult(
@@ -485,13 +547,17 @@ def _process_item(
 
         detail: dict = {}
         for category in selected:
+            stop_check()
             step_out = work_dir / f"{category.value}_{current.name}"
             result = fixes[category](
                 current,
                 step_out,
                 strength=options.strength,
                 deadmesh_dir=options.deadmesh_dir,
+                stop_check=stop_check,
+                item_progress=item_progress,
             )
+            stop_check()
             if not getattr(result, "success", True):
                 base.outcome = Outcome.FAILED
                 base.reason = (
@@ -503,6 +569,8 @@ def _process_item(
             detail[category.value] = _result_detail(result)
             current = step_out
 
+        item_progress("final DeadMesh scan")
+        stop_check()
         final = scanner.scan_file(current)
         base.verdict_after = final.verdict
         remaining = [c for c in final.categories if c in selected]
@@ -519,6 +587,8 @@ def _process_item(
             base.reason = "fix introduced a crash-class defect; output withheld"
             base.detail = detail
             return base
+        item_progress("final regression check")
+        stop_check()
         if not scanner.vs_check(original, current):
             base.outcome = Outcome.FAILED
             base.reason = (
@@ -535,6 +605,8 @@ def _process_item(
         base.output_path = str(destination)
         base.detail = detail
         return base
+    except StopRequested:
+        raise
     except Exception as error:  # fail closed per file, keep the run going
         base.outcome = Outcome.ERROR
         base.reason = f"{type(error).__name__}: {error}"

@@ -13,6 +13,147 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 class PipelineControlTests(unittest.TestCase):
+    def test_heavy_simplification_checks_stop_before_opening_the_mesh(self) -> None:
+        from dmfix.core.fixes.simplify import simplify_collision
+
+        class Requested(Exception):
+            pass
+
+        def stop_check() -> None:
+            raise Requested
+
+        with self.assertRaises(Requested):
+            simplify_collision(
+                "missing-input.nif",
+                "unused-output.nif",
+                stop_check=stop_check,
+            )
+
+    def test_heavy_simplification_stops_after_an_internal_scan(self) -> None:
+        from dmfix.core.fixes.simplify import simplify_collision
+        from dmfix.core.pipeline import RunControl, StopRequested
+
+        control = RunControl()
+        layout = SimpleNamespace(payload=lambda _index: b"shape")
+        collision = SimpleNamespace(
+            shape_chain=("bhkMoppBvTreeShape", "bhkCompressedMeshShape"),
+            shape_block_index=1,
+            child_shape_block_index=2,
+        )
+        scanner = SimpleNamespace(
+            scan_file=lambda _path: (
+                control.request_stop(),
+                SimpleNamespace(raw={}),
+            )[1]
+        )
+        with (
+            patch(
+                "dmfix.core.fixes.simplify.NifFileLayout.read",
+                return_value=layout,
+            ),
+            patch(
+                "dmfix.core.fixes.simplify.locate_collisions",
+                return_value=[collision],
+            ),
+            patch("dmfix.core.fixes.simplify.read_mopp"),
+            patch("dmfix.core.fixes.simplify.decode_compressed_mesh"),
+            patch(
+                "dmfix.core.fixes.simplify._drop_degenerate",
+                return_value=(
+                    [(0.0, 0.0, 0.0)],
+                    [(0, 0, 0)],
+                    [0],
+                ),
+            ),
+            patch(
+                "dmfix.core.fixes.degenerate._scanner",
+                return_value=scanner,
+            ),
+            patch(
+                "dmfix.core.fixes.simplify._connected_face_components"
+            ) as components,
+        ):
+            with self.assertRaises(StopRequested):
+                simplify_collision(
+                    "input.nif",
+                    "output.nif",
+                    stop_check=control.raise_if_stopped,
+                )
+
+        components.assert_not_called()
+
+    def test_stop_during_fix_aborts_at_internal_checkpoint(self) -> None:
+        from dmfix.core.pipeline import (
+            PipelineEventKind,
+            PipelineOptions,
+            RunControl,
+            WorkItem,
+            run_pipeline,
+        )
+        from dmfix.core.report import Outcome
+        from dmfix.core.scanner import FixCategory, ScanRecord
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "dmscan.exe").touch()
+            source = root / "heavy.nif"
+            source.write_bytes(b"nif")
+            scan_temp = root / "scan-temp"
+            scan_temp.mkdir()
+            record = ScanRecord(
+                file=str(source),
+                verdict="VERY HEAVY COLLISION",
+                status="PROBLEM",
+                raw={},
+                categories=[FixCategory.HEAVY],
+            )
+            item = WorkItem(
+                r"meshes\heavy.nif", "loose", source, record=record
+            )
+            control = RunControl()
+            events = []
+
+            def fix(_input, _output, *, stop_check, item_progress, **_kwargs):
+                item_progress("simplification round 1/4")
+                control.request_stop()
+                stop_check()
+
+            with (
+                patch(
+                    "dmfix.core.pipeline.collect_work_items",
+                    return_value=([item], scan_temp),
+                ),
+                patch(
+                    "dmfix.core.pipeline._fix_functions",
+                    return_value={FixCategory.HEAVY: fix},
+                ),
+            ):
+                report = run_pipeline(
+                    root,
+                    PipelineOptions(
+                        deadmesh_dir=root,
+                        output_dir=root / "output" / "Meshes",
+                        categories={FixCategory.HEAVY},
+                        include_bsa=False,
+                    ),
+                    control=control,
+                    on_event=events.append,
+                )
+
+            self.assertEqual(report.status, "stopped")
+            self.assertEqual(report.processed_items, 0)
+            self.assertEqual([result.outcome for result in report.results], [Outcome.NOT_RUN])
+            self.assertEqual(
+                [event.kind for event in events],
+                [
+                    PipelineEventKind.ITEM_STARTED,
+                    PipelineEventKind.ITEM_PROGRESS,
+                    PipelineEventKind.ITEM_COMPLETED,
+                    PipelineEventKind.RUN_STOPPED,
+                ],
+            )
+            self.assertEqual(events[1].message, "simplification round 1/4")
+
     def test_loose_items_preserve_paths_below_selected_folder(self) -> None:
         from dmfix.core.pipeline import PipelineOptions, collect_work_items
         from dmfix.core.scanner import FixCategory, ScanRecord

@@ -5,6 +5,7 @@ import struct
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import fast_simplification
 import numpy as np
@@ -52,13 +53,19 @@ def simplify_collision(
     output_path: str | Path,
     strength: str = "normal",
     deadmesh_dir: str | Path | None = None,
+    stop_check: Callable[[], None] | None = None,
+    item_progress: Callable[[str], None] | None = None,
 ) -> SimplifyResult:
+    stop_check = stop_check or (lambda: None)
+    item_progress = item_progress or (lambda _message: None)
+    stop_check()
     if strength not in STRENGTH_RATIOS:
         raise ValueError(f"unknown simplification strength {strength!r}")
 
     input_path = Path(input_path)
     output_path = Path(output_path)
     output_path.unlink(missing_ok=True)
+    item_progress("analyzing collision")
     layout = NifFileLayout.read(input_path)
     collisions = locate_collisions(input_path)
     if len(collisions) != 1:
@@ -79,7 +86,10 @@ def simplify_collision(
     from dmfix.core.fixes.degenerate import _scanner
 
     scanner = _scanner(deadmesh_dir)
+    item_progress("baseline DeadMesh scan")
+    stop_check()
     baseline = scanner.scan_file(input_path).raw
+    stop_check()
     old_cull_worst = int(baseline["freeze"]["cullWorst"])
     initial_target = min(
         max(200, math.floor(len(triangles) * STRENGTH_RATIOS[strength])),
@@ -89,10 +99,13 @@ def simplify_collision(
     last_scan: dict | None = None
     last_triangle_count = 0
     last_round = 0
+    item_progress("analyzing collision components")
+    stop_check()
     component_count = len(
         _connected_face_components(list(range(len(triangles))), vertices, triangles)
     )
     for round_number in range(1, 5):
+        stop_check()
         if round_number == 4:
             if (
                 component_count <= 100
@@ -111,6 +124,11 @@ def simplify_collision(
         else:
             hull_variants = (0, 16)
         for hull_threshold in hull_variants:
+            variant = "decimation" if hull_threshold == 0 else "hull fallback"
+            item_progress(
+                f"simplification round {round_number}/4: {variant}"
+            )
+            stop_check()
             new_vertices, new_triangles, new_materials = _simplify_by_material(
                 vertices,
                 triangles,
@@ -120,15 +138,21 @@ def simplify_collision(
                 aggressiveness=(6.0, 8.0, 10.0)[target_round - 1],
                 hull_threshold=hull_threshold,
             )
+            stop_check()
             encoded = _encode_compressed_mesh(mesh, new_vertices, new_triangles, new_materials)
             last_triangle_count = len(encoded.triangles)
 
+            item_progress(
+                f"simplification round {round_number}/4: MOPP rebuild"
+            )
+            stop_check()
             code, origin, scale, _, _ = _compile_verified_mopp(
                 encoded.vertices,
                 encoded.triangles,
                 encoded.output_ids,
                 mesh.radius,
             )
+            stop_check()
             mopp_payload = _serialize_mopp(old_mopp, code, origin, scale)
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,7 +168,12 @@ def simplify_collision(
             if output_layout.payload(collision.child_shape_block_index) != shape_payload:
                 raise AssertionError("bhkCompressedMeshShape payload changed")
 
+            item_progress(
+                f"simplification round {round_number}/4: DeadMesh scan"
+            )
+            stop_check()
             last_scan = scanner.scan_file(output_path).raw
+            stop_check()
             last_round = round_number
             if simplify_scan_is_acceptable(baseline, last_scan):
                 return SimplifyResult(
