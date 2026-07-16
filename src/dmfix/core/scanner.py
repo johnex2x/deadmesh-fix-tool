@@ -6,8 +6,10 @@ what is broken and on whether a fix worked. We never re-derive verdicts ourselve
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -90,8 +92,10 @@ class DmScan:
         if not self.exe.is_file():
             raise DmScanError(f"dmscan.exe not found in {self.deadmesh_dir}")
 
-    def _run(self, args: list[str], timeout: int = 600) -> str:
-        proc = subprocess.run(
+    def _invoke(
+        self, args: list[str], timeout: int = 600
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [str(self.exe), *args],
             capture_output=True,
             text=True,
@@ -101,6 +105,9 @@ class DmScan:
             cwd=str(self.deadmesh_dir),
             creationflags=_NO_WINDOW,
         )
+
+    def _run(self, args: list[str], timeout: int = 600) -> str:
+        proc = self._invoke(args, timeout)
         # dmscan uses the exit code as a scan summary: 0 = clean, 1 = problems
         # found. Both carry valid output; only >= 2 is a real failure.
         if proc.returncode not in (0, 1):
@@ -114,26 +121,36 @@ class DmScan:
         args = ["--json-dir", str(Path(folder).resolve())]
         if not include_bsa:
             args.append("--no-bsa")
-        out = self._run(args, timeout=3600)
-        records: list[ScanRecord] = []
-        for line in out.splitlines():
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            records.append(
-                ScanRecord(
-                    file=raw.get("file", ""),
-                    verdict=raw.get("verdict", ""),
-                    status=raw.get("status", ""),
-                    raw=raw,
-                    categories=classify(raw),
+        proc = self._invoke(args, timeout=3600)
+        fallback_paths: list[Path] = []
+        if proc.returncode not in (0, 1):
+            fallback_paths = _cannot_stat_nifs(proc.stderr)
+            if not fallback_paths:
+                raise DmScanError(
+                    f"dmscan {' '.join(args)} failed (exit {proc.returncode}): "
+                    f"{proc.stderr[:500]}"
                 )
-            )
+
+        records = _parse_records(proc.stdout)
+        known_files = {str(Path(record.file).resolve()).casefold() for record in records}
+        for path in fallback_paths:
+            record = self._scan_fallback_file(path)
+            normalized = str(Path(record.file).resolve()).casefold()
+            if normalized not in known_files:
+                records.append(record)
+                known_files.add(normalized)
         return records
+
+    def _scan_fallback_file(self, path: Path) -> ScanRecord:
+        """Single-scan a directory-mode Unicode failure through an ASCII filename."""
+        with tempfile.TemporaryDirectory(prefix="dmfix-scan-") as temp:
+            staged = Path(temp) / "input.nif"
+            shutil.copyfile(path, staged)
+            record = self.scan_file(staged)
+        original = str(path.resolve())
+        record.file = original
+        record.raw["file"] = original
+        return record
 
     def vs_check(self, original: str | Path, rebuilt: str | Path) -> bool:
         """dmscan --vs winding regression gate. True = rebuild is safe.
@@ -166,6 +183,45 @@ class DmScan:
             raw=raw,
             categories=classify(raw),
         )
+
+
+def _parse_records(out: str) -> list[ScanRecord]:
+    records: list[ScanRecord] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        records.append(
+            ScanRecord(
+                file=raw.get("file", ""),
+                verdict=raw.get("verdict", ""),
+                status=raw.get("status", ""),
+                raw=raw,
+                categories=classify(raw),
+            )
+        )
+    return records
+
+
+def _cannot_stat_nifs(stderr: str) -> list[Path]:
+    """Return recoverable NIF paths from dmscan's Unicode directory-scan failure."""
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return []
+    paths: list[Path] = []
+    prefix = "cannot stat "
+    for line in lines:
+        if not line.startswith(prefix):
+            return []
+        path = Path(line[len(prefix) :])
+        if path.suffix.casefold() != ".nif" or not path.is_file():
+            return []
+        paths.append(path)
+    return paths
 
 
 def find_deadmesh_dir(candidates: list[str | Path] | None = None) -> Path | None:

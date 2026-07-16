@@ -52,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A mod path may contain characters outside the active Windows console
+    # encoding. Reports remain UTF-8; console output must not abort the run.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
+
     args = build_parser().parse_args(argv)
 
     target = Path(args.folder)
