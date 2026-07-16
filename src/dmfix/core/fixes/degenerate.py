@@ -39,7 +39,10 @@ def fix_degenerate(
         layout = NifFileLayout.read(input_path)
         collisions = locate_collisions(input_path)
         if len(collisions) != 1:
-            raise ValueError(f"expected exactly one MOPP collision, found {len(collisions)}")
+            raise ValueError(
+                "UNSUPPORTED_MULTI_MOPP: degenerate cleanup requires one "
+                f"independent collision group; found {len(collisions)}"
+            )
         collision = collisions[0]
         if collision.shape_chain[1] != "bhkCompressedMeshShape":
             raise ValueError(f"unsupported MOPP child shape {collision.shape_chain[1]}")

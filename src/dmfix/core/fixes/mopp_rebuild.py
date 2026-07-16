@@ -56,55 +56,56 @@ def rebuild_mopp(input_path: str | Path, output_path: str | Path) -> MoppRebuild
     output_path = Path(output_path)
     layout = NifFileLayout.read(input_path)
     collisions = locate_collisions(input_path)
-    if len(collisions) != 1:
-        raise ValueError(f"expected exactly one MOPP collision, found {len(collisions)}")
-    collision = collisions[0]
-    if collision.shape_chain[1] != "bhkCompressedMeshShape":
-        raise ValueError(f"unsupported MOPP child shape {collision.shape_chain[1]}")
-
-    old_mopp = read_mopp(layout, collision.shape_block_index)
-    mesh = decode_compressed_mesh(layout, collision.child_shape_block_index)
-    new_code, origin, scale, messages, verifier = _compile_verified_mopp(
-        mesh.vertices,
-        mesh.triangles,
-        mesh.output_ids,
-        mesh.radius,
-    )
-    largest_dim = MOPP_SCALE_NUMERATOR / scale
-
-    old_largest_dim = MOPP_SCALE_NUMERATOR / old_mopp.scale
-    old_false_positive_rate, _ = verifier.verify_tightness(
-        old_mopp.code,
-        old_mopp.origin,
-        old_largest_dim,
-        mesh.vertices,
-        mesh.triangles,
-        mesh.radius,
-    )
-    new_false_positive_rate, _ = verifier.verify_tightness(
-        new_code,
-        origin,
-        largest_dim,
-        mesh.vertices,
-        mesh.triangles,
-        mesh.radius,
-    )
-
-    new_payload = _serialize_mopp(old_mopp, new_code, origin, scale)
+    if not collisions:
+        raise ValueError("no MOPP collision found")
+    replacements: dict[int, bytes] = {}
+    first_index = collisions[0].shape_block_index
+    old_size = 0
+    new_size = 0
+    total_triangles = 0
+    all_messages: list[str] = []
+    old_rate = 0.0
+    new_rate = 0.0
+    for collision in collisions:
+        if collision.shape_chain[1] != "bhkCompressedMeshShape":
+            raise ValueError(f"unsupported MOPP child shape {collision.shape_chain[1]}")
+        old_mopp = read_mopp(layout, collision.shape_block_index)
+        mesh = decode_compressed_mesh(layout, collision.child_shape_block_index)
+        new_code, origin, scale, messages, verifier = _compile_verified_mopp(
+            mesh.vertices, mesh.triangles, mesh.output_ids, mesh.radius
+        )
+        largest_dim = MOPP_SCALE_NUMERATOR / scale
+        old_largest_dim = MOPP_SCALE_NUMERATOR / old_mopp.scale
+        old_rate_part, _ = verifier.verify_tightness(
+            old_mopp.code, old_mopp.origin, old_largest_dim,
+            mesh.vertices, mesh.triangles, mesh.radius,
+        )
+        new_rate_part, _ = verifier.verify_tightness(
+            new_code, origin, largest_dim,
+            mesh.vertices, mesh.triangles, mesh.radius,
+        )
+        old_rate += old_rate_part
+        new_rate += new_rate_part
+        all_messages.extend(messages)
+        payload = _serialize_mopp(old_mopp, new_code, origin, scale)
+        replacements[collision.shape_block_index] = payload
+        old_size += layout.blocks[collision.shape_block_index].size
+        new_size += len(payload)
+        total_triangles += len(mesh.triangles)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(layout.replace_block(collision.shape_block_index, new_payload))
+    output_path.write_bytes(layout.replace_blocks(replacements))
     return MoppRebuildResult(
         output_path=output_path,
-        mopp_block_index=collision.shape_block_index,
-        old_block_size=layout.blocks[collision.shape_block_index].size,
-        new_block_size=len(new_payload),
-        triangle_count=len(mesh.triangles),
+        mopp_block_index=first_index,
+        old_block_size=old_size,
+        new_block_size=new_size,
+        triangle_count=total_triangles,
         verifier_passed=True,
-        verifier_messages=tuple(messages),
+        verifier_messages=tuple(all_messages),
         surface_reachability=1.0,
-        old_false_positive_rate=old_false_positive_rate,
-        new_false_positive_rate=new_false_positive_rate,
+        old_false_positive_rate=old_rate,
+        new_false_positive_rate=new_rate,
     )
 
 
@@ -231,13 +232,23 @@ def decode_compressed_mesh(layout: NifFileLayout, shape_block_index: int) -> Col
     for triangle_index in range(big_triangle_count):
         a, b, c = struct.unpack_from("<3H", data, pos)
         material_index = struct.unpack_from("<I", data, pos + 6)[0]
-        if material_index >= len(material_entries):
+        # Havok uses 0xFFFF for the default material on big triangles.  It is
+        # not an index into the compressed-mesh material table (unlike chunk
+        # materials); rejecting it made otherwise valid meshes look corrupt.
+        if material_index == 0xFFFF:
+            triangle_material = 0
+        elif material_index < len(material_entries):
+            triangle_material = material_entries[material_index][0]
+        elif material_index in {entry[0] for entry in material_entries}:
+            # A few exporters store the Havok material value directly.
+            triangle_material = material_index
+        else:
             raise ValueError(
                 f"big triangle {triangle_index} has invalid material index {material_index}"
             )
         triangles.append((a, b, c))
         output_ids.append(triangle_index)
-        triangle_materials.append(material_entries[material_index][0])
+        triangle_materials.append(triangle_material)
         pos += 12  # indices, material, welding
 
     chunk_count = struct.unpack_from("<I", data, pos)[0]
