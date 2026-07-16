@@ -18,3 +18,10 @@ def ensure_vendor_on_path() -> Path:
     if str(vendor) not in sys.path:
         sys.path.insert(0, str(vendor))
     return vendor
+
+
+def icon_path() -> Path:
+    """Path to the app icon (assets/icon.ico), both from source and frozen."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS")) / "assets" / "icon.ico"
+    return Path(__file__).resolve().parents[3] / "assets" / "icon.ico"

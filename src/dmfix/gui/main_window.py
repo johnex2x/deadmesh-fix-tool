@@ -8,14 +8,13 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QCloseEvent, QDesktopServices
+from PySide6.QtGui import QColor, QCloseEvent, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -32,12 +31,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dmfix import __version__
 from dmfix.core.pipeline import (
+    PipelineEvent,
+    PipelineEventKind,
     PipelineOptions,
+    RunControl,
     WorkItem,
     collect_work_items,
     run_pipeline,
 )
+from dmfix.core.paths import icon_path
 from dmfix.core.report import Outcome, RunReport
 from dmfix.core.scanner import FixCategory, find_deadmesh_dir
 from dmfix.gui.i18n import set_language, tr
@@ -53,6 +57,15 @@ CATEGORY_KEYS = {
     FixCategory.UNFIXABLE: "category_unfixable",
 }
 STRENGTHS = ("conservative", "normal", "aggressive")
+OUTCOME_COLORS = {
+    Outcome.FIXED: "#2e7d32",
+    Outcome.FAILED: "#c62828",
+    Outcome.UNFIXABLE: "#a35100",
+    Outcome.SKIPPED: "#616161",
+    Outcome.ERROR: "#616161",
+    Outcome.NOT_RUN: "#616161",
+    None: "#616161",
+}
 
 
 def derive_output_folder(target_folder: str) -> str:
@@ -111,6 +124,7 @@ class ScanWorker(QObject):
 
 class FixWorker(QObject):
     progress = Signal(str, int, int, str)
+    event = Signal(object)
     finished = Signal(object)
     error = Signal(str, str)
 
@@ -118,12 +132,17 @@ class FixWorker(QObject):
         super().__init__()
         self.target_folder = target_folder
         self.options = options
+        self.control = RunControl()
 
     @Slot()
     def run(self) -> None:
         try:
             report = run_pipeline(
-                self.target_folder, self.options, self.progress.emit
+                self.target_folder,
+                self.options,
+                self.progress.emit,
+                control=self.control,
+                on_event=self.event.emit,
             )
         except Exception as error:
             self.error.emit(type(error).__name__, str(error))
@@ -142,6 +161,8 @@ class SetupDialog(QDialog):
         self.explanation.setWordWrap(True)
         self.hint = QLabel()
         self.hint.setWordWrap(True)
+        self.hint.setOpenExternalLinks(True)
+        self.hint.setTextFormat(Qt.TextFormat.RichText)
         self.folder_label = QLabel()
         self.folder_edit = QLineEdit(str(suggestion or ""))
         self.browse_button = QPushButton()
@@ -208,6 +229,8 @@ class MainWindow(QMainWindow):
         self._close_when_finished = False
         self._status_key = "status_ready"
         self._status_values: dict[str, object] = {}
+        self._row_by_path: dict[str, int] = {}
+        self._live_counts = {outcome.value: 0 for outcome in Outcome}
 
         self._build_ui()
         self._load_values()
@@ -219,22 +242,50 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         self.setCentralWidget(central)
 
+        # Colors chosen for >=4.5:1 contrast against white button text
+        # (WCAG AA for normal text): #2f6fed ~4.55:1, #257a35 ~5.37:1.
+        scan_button_style = (
+            "QPushButton {"
+            " background-color: #2f6fed; color: white; font-weight: 600;"
+            " padding: 6px 20px; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #4a86f5; }"
+            "QPushButton:pressed { background-color: #1f56c9; }"
+            "QPushButton:disabled { background-color: #3a3a3a; color: #8a8a8a; }"
+        )
+        fix_button_style = (
+            "QPushButton {"
+            " background-color: #257a35; color: white; font-weight: 600;"
+            " padding: 6px 20px; border: none; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #339c48; }"
+            "QPushButton:pressed { background-color: #1c5c29; }"
+            "QPushButton:disabled { background-color: #3a3a3a; color: #8a8a8a; }"
+        )
+
         folders = QGridLayout()
         self.target_label = QLabel()
         self.target_edit = QLineEdit()
         self.target_browse = QPushButton()
-        self.scan_button = QPushButton()
         folders.addWidget(self.target_label, 0, 0)
         folders.addWidget(self.target_edit, 0, 1)
         folders.addWidget(self.target_browse, 0, 2)
-        folders.addWidget(self.scan_button, 0, 3)
         self.output_label = QLabel()
         self.output_edit = QLineEdit()
         self.output_browse = QPushButton()
         folders.addWidget(self.output_label, 1, 0)
-        folders.addWidget(self.output_edit, 1, 1, 1, 2)
-        folders.addWidget(self.output_browse, 1, 3)
+        folders.addWidget(self.output_edit, 1, 1)
+        folders.addWidget(self.output_browse, 1, 2)
+        self.scan_scope_label = QLabel()
+        self.include_bsa_check = QCheckBox()
+        folders.addWidget(self.scan_scope_label, 2, 0)
+        folders.addWidget(self.include_bsa_check, 2, 1)
         layout.addLayout(folders)
+
+        self.scan_button = QPushButton()
+        self.scan_button.setStyleSheet(scan_button_style)
+        scan_row = QHBoxLayout()
+        scan_row.addWidget(self.scan_button)
+        scan_row.addStretch(1)
+        layout.addLayout(scan_row)
 
         self.categories_group = QGroupBox()
         categories_layout = QGridLayout(self.categories_group)
@@ -254,20 +305,25 @@ class MainWindow(QMainWindow):
         self.strength_combo = QComboBox()
         for strength in STRENGTHS:
             self.strength_combo.addItem("", strength)
-        self.include_bsa_check = QCheckBox()
         categories_layout.addWidget(self.strength_label, 2, 0)
         categories_layout.addWidget(self.strength_combo, 2, 1)
-        categories_layout.addWidget(self.include_bsa_check, 2, 2)
         layout.addWidget(self.categories_group)
 
         action_row = QHBoxLayout()
         self.fix_button = QPushButton()
         self.fix_button.setEnabled(False)
+        self.fix_button.setStyleSheet(fix_button_style)
+        self.pause_button = QPushButton()
+        self.pause_button.setEnabled(False)
+        self.stop_button = QPushButton()
+        self.stop_button.setEnabled(False)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self.status_label = QLabel()
         action_row.addWidget(self.fix_button)
+        action_row.addWidget(self.pause_button)
+        action_row.addWidget(self.stop_button)
         action_row.addWidget(self.progress_bar, 1)
         action_row.addWidget(self.status_label, 2)
         layout.addLayout(action_row)
@@ -327,6 +383,8 @@ class MainWindow(QMainWindow):
         self.output_browse.clicked.connect(self._browse_output)
         self.scan_button.clicked.connect(self._scan)
         self.fix_button.clicked.connect(self._fix)
+        self.pause_button.clicked.connect(self._toggle_pause)
+        self.stop_button.clicked.connect(self._stop)
         self.target_edit.textChanged.connect(self._target_changed)
         self.output_edit.textEdited.connect(self._output_edited)
         for checkbox in self.category_checks.values():
@@ -352,20 +410,24 @@ class MainWindow(QMainWindow):
         self._category_changed()
 
     def _retranslate(self) -> None:
-        self.setWindowTitle(tr("app_title"))
+        self.setWindowTitle(f"{tr('app_title')} {__version__}")
         self.target_label.setText(tr("target_folder"))
         self.output_label.setText(tr("output_folder"))
         self.target_browse.setText(tr("browse"))
         self.output_browse.setText(tr("browse"))
         self.scan_button.setText(tr("scan"))
+        self.scan_scope_label.setText(tr("scan_scope"))
+        self.include_bsa_check.setText(tr("include_bsa"))
         self.categories_group.setTitle(tr("fix_categories"))
         for category, checkbox in self.category_checks.items():
             checkbox.setText(tr(CATEGORY_KEYS[category]))
         self.strength_label.setText(tr("strength"))
         for index, strength in enumerate(STRENGTHS):
             self.strength_combo.setItemText(index, tr(f"strength_{strength}"))
-        self.include_bsa_check.setText(tr("include_bsa"))
+        self.strength_combo.setToolTip(tr("strength_hint"))
         self.fix_button.setText(tr("fix"))
+        self.pause_button.setText(tr("pause"))
+        self.stop_button.setText(tr("stop"))
         self.results_table.setHorizontalHeaderLabels(
             [
                 tr("column_selected"),
@@ -433,11 +495,14 @@ class MainWindow(QMainWindow):
         self._invalidate_preview()
 
     def _invalidate_preview(self) -> None:
+        had_results = bool(self._pending_items) or self._report is not None
         self._cleanup_scan_temp()
         self._pending_items = []
         self._report = None
         self.report_button.setEnabled(False)
         self._render_rows()
+        if had_results:
+            self._set_status("options_changed_hint")
 
     def _save_controls(self) -> None:
         if not hasattr(self, "category_checks"):
@@ -494,7 +559,30 @@ class MainWindow(QMainWindow):
         options = self._make_options()
         options.only_paths = checked
         worker = FixWorker(target, options)
+        self._live_counts = {outcome.value: 0 for outcome in Outcome}
         self._start_worker(worker, self._fix_finished, "fix")
+
+    def _toggle_pause(self) -> None:
+        worker = self._worker
+        if not isinstance(worker, FixWorker):
+            return
+        if worker.control.is_paused:
+            worker.control.resume()
+            self.pause_button.setText(tr("pause"))
+            self._set_status("status_resume_requested")
+        else:
+            worker.control.request_pause()
+            self.pause_button.setText(tr("resume"))
+            self._set_status("status_pause_requested")
+
+    def _stop(self) -> None:
+        worker = self._worker
+        if not isinstance(worker, FixWorker):
+            return
+        worker.control.request_stop()
+        self.pause_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self._set_status("status_stop_requested")
 
     def _start_worker(
         self,
@@ -505,6 +593,8 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker.moveToThread(thread)
         worker.progress.connect(self._progress)
+        if isinstance(worker, FixWorker):
+            worker.event.connect(self._pipeline_event)
         worker.finished.connect(success)
         worker.finished.connect(worker.deleteLater)
         worker.finished.connect(thread.quit)
@@ -519,11 +609,51 @@ class MainWindow(QMainWindow):
         self._running_kind = kind
         self.scan_button.setEnabled(False)
         self.fix_button.setEnabled(False)
+        self.pause_button.setEnabled(kind == "fix")
+        self.stop_button.setEnabled(kind == "fix")
         self._set_inputs_enabled(False)
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self._set_status("status_scanning" if kind == "scan" else "status_fixing", message="")
         thread.start()
+
+    @Slot(object)
+    def _pipeline_event(self, event: object) -> None:
+        if not isinstance(event, PipelineEvent):
+            return
+        self.progress_bar.setRange(0, max(event.total, 1))
+        row = self._row_by_path.get(event.relative_path.replace("/", "\\").lower())
+        if event.kind is PipelineEventKind.ITEM_STARTED:
+            self.progress_bar.setValue(event.current)
+            if row is not None:
+                self.results_table.item(row, 1).setText(tr("status_processing"))
+            self._set_status(
+                "status_fixing_progress",
+                current=event.current + 1,
+                total=event.total,
+                message=event.relative_path,
+            )
+        elif event.kind is PipelineEventKind.ITEM_COMPLETED and event.result is not None:
+            self.progress_bar.setValue(event.current)
+            if row is not None:
+                self._update_result_row(row, event.result)
+            self._live_counts[event.result.outcome.value] += 1
+            self.count_label.setText(
+                tr("count_summary").format(**self._live_counts)
+            )
+        elif event.kind is PipelineEventKind.RUN_PAUSED:
+            self._set_status(
+                "status_paused", current=event.current, total=event.total
+            )
+        elif event.kind is PipelineEventKind.RUN_RESUMED:
+            self.pause_button.setText(tr("pause"))
+            self._set_status(
+                "status_resumed", current=event.current, total=event.total
+            )
+        elif event.kind is PipelineEventKind.RUN_STOPPED:
+            self._set_status(
+                "status_run_stopped", current=event.current, total=event.total
+            )
 
     @Slot(str, int, int, str)
     def _progress(self, stage: str, current: int, total: int, message: str) -> None:
@@ -548,7 +678,15 @@ class MainWindow(QMainWindow):
     def _fix_finished(self, report: object) -> None:
         self._report = report if isinstance(report, RunReport) else None
         self.progress_bar.setValue(self.progress_bar.maximum())
-        self._set_status("status_run_complete")
+        if self._report is not None and self._report.status == "stopped":
+            self.progress_bar.setValue(self._report.processed_items)
+            self._set_status(
+                "status_run_stopped",
+                current=self._report.processed_items,
+                total=self._report.total_items,
+            )
+        else:
+            self._set_status("status_run_complete")
         self.report_button.setEnabled(self._report is not None)
         self._render_rows()
 
@@ -562,6 +700,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _thread_finished(self) -> None:
+        self.pause_button.setEnabled(False)
+        self.pause_button.setText(tr("pause"))
+        self.stop_button.setEnabled(False)
         self._worker = None
         self._worker_thread = None
         self._running_kind = ""
@@ -578,6 +719,7 @@ class MainWindow(QMainWindow):
             self.output_edit,
             self.output_browse,
             self.categories_group,
+            self.language_combo,
         ):
             widget.setEnabled(enabled)
         if enabled:
@@ -586,9 +728,14 @@ class MainWindow(QMainWindow):
             )
 
     def _update_fix_enabled(self) -> None:
-        self.fix_button.setEnabled(
-            self._worker_thread is None and bool(self._checked_paths())
-        )
+        checked = bool(self._checked_paths())
+        self.fix_button.setEnabled(self._worker_thread is None and checked)
+        if checked:
+            self.fix_button.setToolTip("")
+        elif not self._pending_items and self._report is None:
+            self.fix_button.setToolTip(tr("fix_needs_scan_hint"))
+        else:
+            self.fix_button.setToolTip(tr("fix_needs_selection_hint"))
 
     def _set_status(self, key: str, **values: object) -> None:
         self._status_key = key
@@ -609,12 +756,17 @@ class MainWindow(QMainWindow):
         self._populating_rows = True
         try:
             self.results_table.setRowCount(0)
+            self._row_by_path.clear()
             if self._report is not None:
                 for result in self._report.results:
                     # After a run, only rows the user may want to retry are
                     # checkable, and they start checked so "Fix" immediately
                     # re-runs just the failures (e.g. with another strength).
-                    retryable = result.outcome in (Outcome.FAILED, Outcome.ERROR)
+                    retryable = result.outcome in (
+                        Outcome.FAILED,
+                        Outcome.ERROR,
+                        Outcome.NOT_RUN,
+                    )
                     self._add_result_row(
                         tr(f"status_{result.outcome.value}"),
                         result.relative_path,
@@ -624,6 +776,9 @@ class MainWindow(QMainWindow):
                         result.outcome,
                         checkable=retryable,
                         checked=retryable,
+                    )
+                    self._row_by_path[result.relative_path.replace("/", "\\").lower()] = (
+                        self.results_table.rowCount() - 1
                     )
                 counts = self._report.counts()
                 self.count_label.setText(tr("count_summary").format(**counts))
@@ -646,6 +801,9 @@ class MainWindow(QMainWindow):
                         None,
                         checkable=True,
                         checked=True,
+                    )
+                    self._row_by_path[item.relative_path.replace("/", "\\").lower()] = (
+                        self.results_table.rowCount() - 1
                     )
                 self.count_label.setText(
                     tr("pending_summary").format(count=len(self._pending_items))
@@ -722,15 +880,26 @@ class MainWindow(QMainWindow):
             if tooltip_key:
                 item.setToolTip(tr(tooltip_key))
             self.results_table.setItem(row, offset + 1, item)
-        color = {
-            Outcome.FIXED: QColor("#2e7d32"),
-            Outcome.FAILED: QColor("#c62828"),
-            Outcome.UNFIXABLE: QColor("#ef6c00"),
-            Outcome.SKIPPED: QColor("#757575"),
-            Outcome.ERROR: QColor("#757575"),
-            None: QColor("#757575"),
-        }[outcome]
-        self.results_table.item(row, 1).setForeground(color)
+        # Colors are chosen for >=4.5:1 contrast against a white table
+        # background (WCAG AA for normal text); the stock Material orange
+        # and grey (#ef6c00 / #757575) fall short of that (~3.1:1 / ~4.6:1).
+        self.results_table.item(row, 1).setForeground(
+            QColor(OUTCOME_COLORS[outcome])
+        )
+
+    def _update_result_row(self, row: int, result: FileResult) -> None:
+        values = (
+            tr(f"status_{result.outcome.value}"),
+            result.relative_path,
+            f"{result.verdict_before} -> {result.verdict_after or '-'}",
+            self._category_text(result.categories),
+            result.reason,
+        )
+        for offset, value in enumerate(values, start=1):
+            self.results_table.item(row, offset).setText(value)
+        self.results_table.item(row, 1).setForeground(
+            QColor(OUTCOME_COLORS[result.outcome])
+        )
 
     def _open_output(self) -> None:
         folder = self.output_edit.text().strip()
@@ -751,7 +920,11 @@ class MainWindow(QMainWindow):
         self._retranslate()
 
     def _about(self) -> None:
-        QMessageBox.about(self, tr("about_title"), tr("about_text"))
+        QMessageBox.about(
+            self,
+            f"{tr('about_title')} {__version__}",
+            f"{tr('version')}: {__version__}\n\n{tr('about_text')}",
+        )
 
     def _cleanup_scan_temp(self) -> None:
         if self._scan_temp_dir is not None:
@@ -765,14 +938,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._worker_thread is not None:
+            can_stop = isinstance(self._worker, FixWorker)
             answer = QMessageBox.question(
                 self,
                 tr("run_in_progress_title"),
-                tr("run_in_progress"),
+                tr("stop_and_close" if can_stop else "run_in_progress"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if answer is QMessageBox.StandardButton.Yes:
+                if can_stop:
+                    self._stop()
                 self._close_when_finished = True
                 self.hide()
             event.ignore()
@@ -788,6 +964,8 @@ def run_gui() -> int:
     owns_app = app is None
     if app is None:
         app = QApplication(sys.argv)
+    icon = QIcon(str(icon_path()))
+    app.setWindowIcon(icon)
 
     settings = load()
     if settings.language not in ("en", "zh-TW"):

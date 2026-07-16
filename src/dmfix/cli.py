@@ -12,6 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from dmfix import __version__
 from dmfix.core.pipeline import CATEGORY_ORDER, PipelineOptions, run_pipeline
 from dmfix.core.scanner import DmScanError, FixCategory, find_deadmesh_dir
 
@@ -27,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
             "files to the output folder; originals are never modified."
         ),
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("folder", help="mod folder to scan (recursively, incl. BSA)")
     parser.add_argument(
         "--deadmesh",
@@ -101,7 +103,12 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(report.to_text())
     counts = report.counts()
-    return 1 if counts["failed"] or counts["error"] or counts["unfixable"] else 0
+    return 1 if (
+        report.status == "stopped"
+        or counts["failed"]
+        or counts["error"]
+        or counts["unfixable"]
+    ) else 0
 
 
 if __name__ == "__main__":

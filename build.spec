@@ -4,7 +4,38 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo,
+    StringFileInfo,
+    StringStruct,
+    StringTable,
+    VarFileInfo,
+    VarStruct,
+    VSVersionInfo,
+)
+
 ROOT = Path(SPECPATH)
+sys.path.insert(0, str(ROOT / "src"))
+from dmfix.version import __version__
+
+version_parts = tuple(int(part) for part in __version__.split(".")) + (0,)
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=version_parts, prodvers=version_parts),
+    kids=[
+        StringFileInfo([
+            StringTable("040904B0", [
+                StringStruct("CompanyName", "johnex2x"),
+                StringStruct("FileDescription", "DeadMesh Fix Tool"),
+                StringStruct("FileVersion", __version__),
+                StringStruct("InternalName", "DeadMeshFixTool"),
+                StringStruct("OriginalFilename", "DeadMeshFixTool.exe"),
+                StringStruct("ProductName", "DeadMesh Fix Tool"),
+                StringStruct("ProductVersion", __version__),
+            ])
+        ]),
+        VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+    ],
+)
 
 a = Analysis(
     [str(ROOT / "src" / "dmfix" / "main.py")],
@@ -18,6 +49,7 @@ a = Analysis(
         (str(ROOT / "vendor" / "mopp_verifier.py"), "vendor"),
         (str(ROOT / "LICENSE"), "."),
         (str(ROOT / "README.md"), "."),
+        (str(ROOT / "assets" / "icon.ico"), "assets"),
     ],
     hiddenimports=[
         "dmfix.core.fixes.degenerate",
@@ -39,7 +71,8 @@ exe_gui = EXE(
     exclude_binaries=True,
     name="DeadMeshFixTool",
     console=False,
-    icon=None,
+    icon=str(ROOT / "assets" / "icon.ico"),
+    version=version_info,
 )
 
 exe_cli = EXE(
@@ -49,6 +82,7 @@ exe_cli = EXE(
     name="dmfix",
     console=True,
     icon=None,
+    version=version_info,
 )
 
 coll = COLLECT(

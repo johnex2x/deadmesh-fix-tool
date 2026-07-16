@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import threading
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -18,6 +20,67 @@ from dmfix.core.report import FileResult, Outcome, RunReport
 from dmfix.core.scanner import DmScan, FixCategory, ScanRecord
 
 ProgressCallback = Callable[[str, int, int, str], None]
+
+
+class PipelineEventKind(Enum):
+    ITEM_STARTED = "item_started"
+    ITEM_COMPLETED = "item_completed"
+    RUN_PAUSED = "run_paused"
+    RUN_RESUMED = "run_resumed"
+    RUN_STOPPED = "run_stopped"
+    RUN_FINISHED = "run_finished"
+
+
+@dataclass(frozen=True)
+class PipelineEvent:
+    kind: PipelineEventKind
+    current: int
+    total: int
+    relative_path: str = ""
+    result: FileResult | None = None
+
+
+EventCallback = Callable[[PipelineEvent], None]
+
+
+class RunControl:
+    """Thread-safe cooperative pause and stop control checked between files."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._paused = False
+        self._stop_requested = False
+
+    @property
+    def is_paused(self) -> bool:
+        with self._condition:
+            return self._paused
+
+    @property
+    def is_stop_requested(self) -> bool:
+        with self._condition:
+            return self._stop_requested
+
+    def request_pause(self) -> None:
+        with self._condition:
+            self._paused = True
+
+    def resume(self) -> None:
+        with self._condition:
+            self._paused = False
+            self._condition.notify_all()
+
+    def request_stop(self) -> None:
+        with self._condition:
+            self._stop_requested = True
+            self._paused = False
+            self._condition.notify_all()
+
+    def checkpoint(self) -> bool:
+        with self._condition:
+            while self._paused and not self._stop_requested:
+                self._condition.wait()
+            return not self._stop_requested
 
 # Order matters: structural crash repair first, then geometry cleanups, then
 # the (geometry-changing) simplification, orphan-block removal last.
@@ -219,8 +282,13 @@ def run_pipeline(
     target_folder: str | Path,
     options: PipelineOptions,
     progress: ProgressCallback | None = None,
+    *,
+    control: RunControl | None = None,
+    on_event: EventCallback | None = None,
 ) -> RunReport:
     progress = progress or (lambda *_: None)
+    control = control or RunControl()
+    on_event = on_event or (lambda _event: None)
     target_folder = Path(target_folder)
     scanner = DmScan(options.deadmesh_dir)
     fixes = _fix_functions()
@@ -235,14 +303,70 @@ def run_pipeline(
     if options.only_paths is not None:
         selected = {p.replace("/", "\\").lower() for p in options.only_paths}
         worklist = [item for item in worklist if item.relative_path in selected]
+    report.total_items = len(worklist)
     work_root = Path(tempfile.mkdtemp(prefix="dmfix-work-"))
     try:
         for index, item in enumerate(worklist):
+            was_paused = control.is_paused
+            if was_paused:
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_PAUSED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
+            if not control.checkpoint():
+                report.status = "stopped"
+                for pending in worklist[index:]:
+                    report.results.append(_not_run_result(pending))
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_STOPPED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
+                break
+            if was_paused:
+                on_event(
+                    PipelineEvent(
+                        PipelineEventKind.RUN_RESUMED,
+                        report.processed_items,
+                        report.total_items,
+                    )
+                )
             record = item.record
             assert record is not None
             progress("fix", index, len(worklist), item.relative_path)
+            on_event(
+                PipelineEvent(
+                    PipelineEventKind.ITEM_STARTED,
+                    index,
+                    len(worklist),
+                    item.relative_path,
+                )
+            )
             result = _process_item(item, record, options, fixes, scanner, work_root)
             report.results.append(result)
+            report.processed_items += 1
+            on_event(
+                PipelineEvent(
+                    PipelineEventKind.ITEM_COMPLETED,
+                    report.processed_items,
+                    len(worklist),
+                    item.relative_path,
+                    result,
+                )
+            )
+        else:
+            on_event(
+                PipelineEvent(
+                    PipelineEventKind.RUN_FINISHED,
+                    report.processed_items,
+                    report.total_items,
+                )
+            )
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
         shutil.rmtree(work_root, ignore_errors=True)
@@ -250,6 +374,23 @@ def run_pipeline(
     report.finish()
     report.save(options.output_dir)
     return report
+
+
+def _not_run_result(item: WorkItem) -> FileResult:
+    record = item.record
+    assert record is not None
+    return FileResult(
+        source=(
+            f"{item.source_path}::{item.bsa_inner_path}"
+            if item.source_kind == "bsa"
+            else str(item.source_path)
+        ),
+        relative_path=item.relative_path,
+        categories=[category.value for category in record.categories],
+        outcome=Outcome.NOT_RUN,
+        reason="run stopped before this file started",
+        verdict_before=record.verdict,
+    )
 
 
 def _process_item(
