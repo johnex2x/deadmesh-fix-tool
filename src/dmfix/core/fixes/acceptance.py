@@ -102,6 +102,48 @@ def simplify_scan_is_acceptable(baseline: dict, scan: dict) -> bool:
     return not simplify_certification_failures(baseline, scan)
 
 
+def safety_certification_failures(baseline: dict, scan: dict) -> list[str]:
+    """Return only safety regressions relative to the source scan.
+
+    Heavy/cull findings are deliberately omitted: rescue uses this vector to
+    decide whether a candidate needs local protection while the full
+    certification gate still handles every defect.
+    """
+    failures: list[str] = []
+    if str(scan.get("status", "")) == "BROKEN":
+        failures.append("status=BROKEN")
+    broken_refs = _metric(scan, "broken", "refs")
+    baseline_broken_refs = _metric(baseline, "broken", "refs")
+    if broken_refs > baseline_broken_refs:
+        failures.append(f"broken.refs={broken_refs}>{baseline_broken_refs}")
+    for section, field in (
+        ("orientation", "inverted"),
+        ("orientation", "mixed"),
+        ("winding_cull", "inverted"),
+        ("winding_cull", "ambiguous"),
+    ):
+        value = _metric(scan, section, field)
+        baseline_value = _metric(baseline, section, field)
+        if value > baseline_value:
+            failures.append(f"{section}.{field}={value}>{baseline_value}")
+    if bool(_section(scan, "winding_cull").get("leak")) and not bool(
+        _section(baseline, "winding_cull").get("leak")
+    ):
+        failures.append("winding_cull.leak=true")
+    value = _metric(scan, "degenerate", "tris", "count")
+    baseline_value = _metric(baseline, "degenerate", "tris", "count")
+    if value > baseline_value:
+        failures.append(f"degenerate.tris.count={value}>{baseline_value}")
+    if int(scan.get("orphan_mopp", 0)) > int(baseline.get("orphan_mopp", 0)):
+        failures.append("orphan_mopp increased")
+    if int(scan.get("orphan_collisions", 0)) > int(baseline.get("orphan_collisions", 0)):
+        failures.append("orphan_collisions increased")
+    if baseline.get("ray_status") == "ok" and scan.get("ray_status") == "ok":
+        if not _ray_scan_not_worse(baseline, scan):
+            failures.append("ray safety metrics worsened")
+    return failures
+
+
 def simplify_certification_failures(baseline: dict, scan: dict) -> list[str]:
     """Return the exact safety-gate checks that rejected a candidate.
 

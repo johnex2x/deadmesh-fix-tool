@@ -239,7 +239,12 @@ def _fix_functions():
     try:
         from dmfix.core.fixes.degenerate import fix_degenerate
         functions[FixCategory.DEGENERATE] = lambda src, dst, **kw: fix_degenerate(
-            src, dst, deadmesh_dir=kw.get("deadmesh_dir")
+            src,
+            dst,
+            deadmesh_dir=kw.get("deadmesh_dir"),
+            strength=kw.get("strength", "conservative"),
+            stop_check=kw.get("stop_check"),
+            item_progress=kw.get("item_progress"),
         )
     except ImportError:
         pass
@@ -735,10 +740,14 @@ def _process_item(
         message = str(error)
         base.outcome = (
             Outcome.FAILED
-            if message.startswith("UNSUPPORTED_MULTI_MOPP")
+            if message.startswith("UNSUPPORTED_")
             else Outcome.ERROR
         )
-        base.reason = f"{type(error).__name__}: {error}"
+        base.reason = (
+            message
+            if message.startswith("UNSUPPORTED_")
+            else f"{type(error).__name__}: {error}"
+        )
         return base
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

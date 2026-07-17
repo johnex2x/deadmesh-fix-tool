@@ -53,8 +53,51 @@ class HeavyRescueTests(unittest.TestCase):
         from dmfix.core.fixes.simplify import _rescue_budget
 
         self.assertEqual(_rescue_budget("conservative"), 0)
-        self.assertEqual(_rescue_budget("normal"), 6)
-        self.assertEqual(_rescue_budget("aggressive"), 6)
+        self.assertEqual(_rescue_budget("normal"), 8)
+        self.assertEqual(_rescue_budget("aggressive"), 8)
+
+    def test_safety_defects_are_baseline_relative(self) -> None:
+        from dmfix.core.fixes.acceptance import safety_certification_failures
+
+        baseline = {
+            "status": "OK",
+            "broken": {"refs": 0},
+            "orientation": {"inverted": 0, "mixed": 0},
+            "winding_cull": {"inverted": 106, "ambiguous": 0},
+            "degenerate": {"tris": {"count": 0}},
+            "orphan_mopp": 0,
+            "orphan_collisions": 0,
+            "ray_status": "ok",
+            "fall_through_risk": {"level": "none"},
+            "invisible_walls": {"count": 0},
+        }
+        candidate = {**baseline, "winding_cull": {"inverted": 73, "ambiguous": 0}}
+        self.assertEqual(safety_certification_failures(baseline, candidate), [])
+
+    def test_multi_target_ladder_is_bounded_and_unique(self) -> None:
+        from dmfix.core.fixes.simplify import _multi_targets
+
+        targets = _multi_targets(3424)
+        self.assertEqual(targets, (1500, 1125, 843, 632, 474, 355, 266, 200))
+        self.assertEqual(len(targets), len(set(targets)))
+
+    def test_ambiguous_winding_does_not_pin_local_rescue(self) -> None:
+        from dmfix.core.fixes.simplify import _has_safety_defects
+
+        baseline = {
+            "status": "OK",
+            "broken": {"refs": 0},
+            "orientation": {"inverted": 0, "mixed": 0},
+            "winding_cull": {"inverted": 0, "ambiguous": 0},
+            "degenerate": {"tris": {"count": 0}},
+            "orphan_mopp": 0,
+            "orphan_collisions": 0,
+            "ray_status": "ok",
+            "fall_through_risk": {"level": "none"},
+            "invisible_walls": {"count": 0},
+        }
+        candidate = {**baseline, "winding_cull": {"inverted": 0, "ambiguous": 101}}
+        self.assertFalse(_has_safety_defects(candidate, baseline))
 
     def test_multi_component_safety_rescue_keeps_global_target(self) -> None:
         from dmfix.core.fixes.simplify import _rescue_target

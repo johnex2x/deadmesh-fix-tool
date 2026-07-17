@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 import struct
 from collections import defaultdict
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from dmfix.core.fixes.mopp_rebuild import (
     decode_compressed_mesh,
 )
 from dmfix.core.fixes.acceptance import (
+    safety_certification_failures,
     simplify_certification_failures,
     simplify_scan_is_acceptable,
 )
@@ -82,12 +84,21 @@ def _world_to_havok(point: np.ndarray, collision: CollisionInfo) -> np.ndarray:
 
 
 def _rescue_budget(strength: str) -> int:
-    return {"conservative": 0, "normal": 6, "aggressive": 6}.get(strength, 0)
+    return {"conservative": 0, "normal": 8, "aggressive": 8}.get(strength, 0)
 
 
-def _has_safety_defects(scan: dict | None) -> bool:
+def _has_safety_defects(scan: dict | None, baseline: dict | None = None) -> bool:
     if not scan:
         return False
+    if baseline is not None:
+        # Ambiguous winding is a certification signal, but dmscan does not
+        # provide a reliable point for it. It must not pin a component-local
+        # rescue target after the actual inverted faces are already repaired.
+        return any(
+            failure
+            for failure in safety_certification_failures(baseline, scan)
+            if not failure.startswith("winding_cull.ambiguous=")
+        )
     return any(
         (
             int((scan.get("broken") or {}).get("refs", 0)) > 0,
@@ -159,15 +170,26 @@ def _defect_component_overrides(
 ) -> dict[tuple[tuple[float, float, float], ...], tuple[int, float]]:
     """Map dmscan defect points to components for a safer retry."""
     defects: list[np.ndarray] = []
+    def add_point(value: object) -> None:
+        if not isinstance(value, list) or len(value) != 3:
+            return
+        point = np.asarray(value, dtype=np.float64)
+        if np.allclose(point, 0.0):
+            return
+        defects.append(_world_to_havok(point, collision))
+
     orientation = scan.get("orientation") or {}
     for component in orientation.get("bad_components") or []:
-        center = component.get("center")
-        if isinstance(center, list) and len(center) == 3:
-            defects.append(_world_to_havok(np.asarray(center, dtype=np.float64), collision))
+        add_point(component.get("center"))
     invisible = scan.get("invisible_walls") or {}
     for point in invisible.get("pts") or []:
-        if isinstance(point, list) and len(point) == 3:
-            defects.append(_world_to_havok(np.asarray(point, dtype=np.float64), collision))
+        add_point(point)
+    winding = scan.get("winding_cull") or {}
+    winding_points = winding.get("at") or winding.get("pts") or []
+    if isinstance(winding_points, dict):
+        winding_points = list(winding_points.values())
+    for point in winding_points:
+        add_point(point)
     overrides: dict[tuple[tuple[float, float, float], ...], tuple[int, float]] = {}
     # A single very large, open wall needs a wider local reserve after the
     # second decimation pass; smaller/open bridge islands are safer with the
@@ -221,6 +243,15 @@ def simplify_collision(
     layout = NifFileLayout.read(input_path)
     collisions = locate_collisions(input_path)
     if len(collisions) != 1:
+        if strength != "conservative":
+            return _simplify_multi_collision(
+                input_path,
+                output_path,
+                strength,
+                deadmesh_dir,
+                stop_check,
+                item_progress,
+            )
         raise ValueError(
             "UNSUPPORTED_MULTI_MOPP: heavy simplification requires one independent "
             f"collision group; found {len(collisions)}"
@@ -356,11 +387,13 @@ def simplify_collision(
     component_overrides: dict[
         tuple[tuple[float, float, float], ...], tuple[int, float]
     ] = {}
-    local_only = component_count > 3 and _has_safety_defects(last_scan)
+    local_only = component_count > 3 and _has_safety_defects(last_scan, baseline)
     gentle_reduction = local_only
     reduction_index = 0
     rescue_initial_target = 1500 if topology_reserve == 8 else initial_target
     target = rescue_initial_target
+    previous_progress: tuple[int, ...] | None = None
+    stalled_candidates = 0
     for rescue_index in range(rescue_budget):
         stop_check()
         target = _rescue_target(
@@ -420,15 +453,14 @@ def simplify_collision(
             mesh.radius,
         )
         mopp_payload = _serialize_mopp(old_mopp, code, origin, scale)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(
-            layout.replace_blocks(
-                {
-                    mesh.data_block_index: encoded.payload,
-                    collision.shape_block_index: mopp_payload,
-                }
-            )
+        candidate_bytes = layout.replace_blocks(
+            {
+                mesh.data_block_index: encoded.payload,
+                collision.shape_block_index: mopp_payload,
+            }
         )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(candidate_bytes)
         output_layout = NifFileLayout.read(output_path)
         if output_layout.payload(collision.child_shape_block_index) != shape_payload:
             raise AssertionError("bhkCompressedMeshShape payload changed")
@@ -451,6 +483,21 @@ def simplify_collision(
                 tolerance_used=_tolerance_description(baseline, last_scan),
                 certification_failures=(),
             )
+        progress = (
+            int(last_scan["freeze"]["cullWorst"]),
+            int(last_scan["freeze"]["cullVerdict"]),
+            int(last_scan["orientation"]["inverted"]),
+            int(last_scan["winding_cull"]["inverted"]),
+            int(last_scan["invisible_walls"]["count"]),
+            last_triangle_count,
+        )
+        if progress == previous_progress:
+            stalled_candidates += 1
+            if stalled_candidates >= 1:
+                break
+        else:
+            stalled_candidates = 0
+        previous_progress = progress
         new_overrides = _defect_component_overrides(
             last_scan, provenance, collision, strength
         )
@@ -466,8 +513,13 @@ def simplify_collision(
                 component_overrides.update(new_overrides)
             else:
                 component_overrides = new_overrides
-        has_safety_defects = _has_safety_defects(last_scan)
-        if not has_safety_defects:
+        has_safety_defects = _has_safety_defects(last_scan, baseline)
+        retain_topology_overrides = (
+            topology_reserve == 8
+            and component_count > 10
+            and bool(component_overrides)
+        )
+        if not has_safety_defects and not retain_topology_overrides:
             component_overrides.clear()
         if component_count > 3 and has_safety_defects:
             local_only = True
@@ -504,15 +556,191 @@ def simplify_collision(
     )
 
 
+def _multi_targets(triangle_count: int) -> tuple[int, ...]:
+    """Return a short, deterministic target ladder for one MOPP group."""
+    first = min(1500, max(200, triangle_count))
+    values = [first]
+    while len(values) < 8:
+        next_target = max(200, math.floor(values[-1] * 0.75))
+        if next_target >= values[-1]:
+            break
+        values.append(next_target)
+    return tuple(values)
+
+
+def _encode_collision_replacement(
+    layout: NifFileLayout,
+    collision: CollisionInfo,
+    mesh: CollisionMesh,
+    vertices: list[tuple[float, float, float]],
+    triangles: list[tuple[int, int, int]],
+    materials: list[int],
+) -> dict[int, bytes]:
+    encoded = _encode_compressed_mesh(mesh, vertices, triangles, materials)
+    code, origin, scale, _, _ = _compile_verified_mopp(
+        encoded.vertices,
+        encoded.triangles,
+        encoded.output_ids,
+        mesh.radius,
+    )
+    return {
+        mesh.data_block_index: encoded.payload,
+        collision.shape_block_index: _serialize_mopp(
+            read_mopp(layout, collision.shape_block_index), code, origin, scale
+        ),
+    }
+
+
+def _simplify_multi_collision(
+    input_path: Path,
+    output_path: Path,
+    strength: str,
+    deadmesh_dir: str | Path | None,
+    stop_check: Callable[[], None],
+    item_progress: Callable[[str], None],
+) -> SimplifyResult:
+    """Simplify independent MOPP groups with whole-file certification."""
+    from dmfix.core.fixes.degenerate import _scanner
+
+    layout = NifFileLayout.read(input_path)
+    collisions = locate_collisions(input_path)
+    if not collisions:
+        raise ValueError("no MOPP collision found")
+    if any(c.shape_chain[1] != "bhkCompressedMeshShape" for c in collisions):
+        raise ValueError("UNSUPPORTED_MULTI_MOPP: child shape is not compressed mesh")
+    scanner = _scanner(deadmesh_dir)
+    item_progress("baseline DeadMesh scan")
+    stop_check()
+    baseline = scanner.scan_file(input_path).raw
+    if int((baseline.get("freeze") or {}).get("strayRisk", 0)) > 0:
+        raise ValueError(
+            "UNSUPPORTED_STRAY_CHUNK: multi-MOPP collision has an outlying chunk"
+        )
+
+    meshes = [decode_compressed_mesh(layout, c.child_shape_block_index) for c in collisions]
+    data_blocks = [mesh.data_block_index for mesh in meshes]
+    if len(set(data_blocks)) != len(data_blocks):
+        raise ValueError("UNSUPPORTED_MULTI_MOPP: collision groups share mesh data")
+    order = sorted(range(len(collisions)), key=lambda i: len(meshes[i].triangles), reverse=True)
+    seen_candidates: set[str] = set()
+    rounds = 0
+    last_scan = baseline
+    last_triangle_count = sum(len(mesh.triangles) for mesh in meshes)
+    old_triangle_count = last_triangle_count
+    old_cull_worst = int(baseline["freeze"]["cullWorst"])
+
+    for group_index in order:
+        collision = collisions[group_index]
+        mesh = meshes[group_index]
+        vertices, triangles, materials = _drop_degenerate(mesh)
+        if not triangles:
+            continue
+        for target in _multi_targets(len(triangles)):
+            if rounds >= 8:
+                break
+            stop_check()
+            item_progress(
+                f"multi-MOPP group {group_index + 1}/{len(collisions)}: target {target}"
+            )
+            new_vertices, new_triangles, new_materials = _simplify_by_material(
+                vertices,
+                triangles,
+                materials,
+                target,
+                component_floor=1,
+                aggressiveness=20.0 if strength == "aggressive" else 10.0,
+                hull_threshold=0,
+                repair_closed_winding=True,
+                repeat_passes=2,
+            )
+            replacements = _encode_collision_replacement(
+                layout, collision, mesh, new_vertices, new_triangles, new_materials
+            )
+            candidate_bytes = layout.replace_blocks(replacements)
+            candidate_hash = hashlib.sha256(candidate_bytes).hexdigest()
+            if candidate_hash in seen_candidates:
+                output_path.unlink(missing_ok=True)
+                return SimplifyResult(
+                    success=False,
+                    output_path=output_path,
+                    rounds=rounds,
+                    old_triangle_count=old_triangle_count,
+                    new_triangle_count=last_triangle_count,
+                    old_cull_worst=old_cull_worst,
+                    new_cull_worst=int(last_scan["freeze"]["cullWorst"]),
+                    cull_verdict=int(last_scan["freeze"]["cullVerdict"]),
+                    verdict=last_scan["verdict"],
+                    verifier_passed=True,
+                    welding_arrays_empty=True,
+                    tolerance_used=_tolerance_description(baseline, last_scan),
+                    certification_failures=tuple(
+                        simplify_certification_failures(baseline, last_scan)
+                    ),
+                    reason="NO_PROGRESS: repeated multi-MOPP candidate",
+                )
+            seen_candidates.add(candidate_hash)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(candidate_bytes)
+            rounds += 1
+            last_triangle_count = sum(
+                len(new_triangles) if index == group_index else len(other.triangles)
+                for index, other in enumerate(meshes)
+            )
+            stop_check()
+            last_scan = scanner.scan_file(output_path).raw
+            if simplify_scan_is_acceptable(baseline, last_scan):
+                return SimplifyResult(
+                    True,
+                    output_path,
+                    rounds,
+                    old_triangle_count,
+                    last_triangle_count,
+                    old_cull_worst,
+                    int(last_scan["freeze"]["cullWorst"]),
+                    int(last_scan["freeze"]["cullVerdict"]),
+                    last_scan["verdict"],
+                    True,
+                    True,
+                    _tolerance_description(baseline, last_scan),
+                )
+    output_path.unlink(missing_ok=True)
+    failures = tuple(simplify_certification_failures(baseline, last_scan))
+    return SimplifyResult(
+        success=False,
+        output_path=output_path,
+        rounds=rounds,
+        old_triangle_count=old_triangle_count,
+        new_triangle_count=last_triangle_count,
+        old_cull_worst=old_cull_worst,
+        new_cull_worst=int(last_scan["freeze"]["cullWorst"]),
+        cull_verdict=int(last_scan["freeze"]["cullVerdict"]),
+        verdict=last_scan["verdict"],
+        verifier_passed=True,
+        welding_arrays_empty=True,
+        tolerance_used=_tolerance_description(baseline, last_scan),
+        certification_failures=failures,
+        reason="multi-MOPP candidates were rejected: "
+        + (", ".join(failures) or "NO_PROGRESS"),
+    )
+
+
 def _drop_degenerate(
     mesh: CollisionMesh,
+    *,
+    geometric: bool = False,
 ) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]], list[int]]:
     if len(mesh.triangle_materials) != len(mesh.triangles):
         raise ValueError("compressed mesh material count does not match triangle count")
     triangles: list[tuple[int, int, int]] = []
     materials: list[int] = []
+    point_keys = {
+        index: tuple(round(value, 6) for value in point)
+        for index, point in enumerate(mesh.vertices)
+    }
     for triangle, material in zip(mesh.triangles, mesh.triangle_materials):
         if len(set(triangle)) != 3:
+            continue
+        if geometric and len({point_keys[index] for index in triangle}) != 3:
             continue
         a, b, c = (np.asarray(mesh.vertices[index]) for index in triangle)
         if float(np.dot(np.cross(b - a, c - a), np.cross(b - a, c - a))) <= 1e-24:
